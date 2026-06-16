@@ -1,0 +1,50 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Setup Is It Dead?",
+        "description": "Configure surveillance settings for detecting stale or dead sensors. By default, all entities in the selected domains will be monitored.",
+        "data": {
+          "monitored_domains": "Domains to monitor",
+          "learning_period": "Learning Period (Days)",
+          "multiplier": "Threshold Multiplier (Average * Multiplier)",
+          "min_timeout": "Minimum Timeout (Hours)",
+          "max_timeout": "Maximum Timeout (Hours)",
+          "update_interval": "Inactivity Check Interval (Minutes)"
+        }
+      }
+    },
+    "error": {
+      "invalid_yaml": "The Custom Timeouts YAML is invalid.",
+      "invalid_domains": "Please select at least one domain to monitor."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Configure Is It Dead?",
+        "description": "Adjust learning rules, update thresholds, and exclude specific entities from surveillance. Proposed exclusions (entities that have never reported) will be pre-populated.",
+        "data": {
+          "monitored_domains": "Domains to monitor",
+          "learning_period": "Learning Period (Days)",
+          "multiplier": "Threshold Multiplier (Average * Multiplier)",
+          "min_timeout": "Minimum Timeout (Hours)",
+          "max_timeout": "Maximum Timeout (Hours)",
+          "update_interval": "Inactivity Check Interval (Minutes)",
+          "excluded_entities": "Entities to exclude",
+          "custom_timeouts": "YAML Custom Timeouts (Entity ID: Hours)"
+        }
+      }
+    },
+    "error": {
+      "invalid_yaml": "The Custom Timeouts YAML is invalid.",
+      "invalid_domains": "Please select at least one domain to monitor."
+    }
+  },
+  "issues": {
+    "sensor_dead": {
+      "title": "{name} is dead (No report)",
+      "description": "The sensor `{entity_id}` ({name}) has stopped reporting. It may be out of range or its battery has depleted.\n\nRequired battery: **{battery_type}**.\n\nPlease replace the battery or restore range connection."
+    }
+  }
+}

@@ -1,0 +1,14 @@
+# Python bytecode/caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IDE and Editor settings
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Local system files
+.DS_Store
+Thumbs.db

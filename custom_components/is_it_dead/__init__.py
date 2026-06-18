@@ -28,14 +28,17 @@ from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from .const import (
+    CONF_BATTERY_ONLY,
     CONF_CUSTOM_TIMEOUTS,
     CONF_EXCLUDED_ENTITIES,
+    CONF_EXCLUDED_INTEGRATIONS,
     CONF_LEARNING_PERIOD,
     CONF_MAX_TIMEOUT,
     CONF_MIN_TIMEOUT,
     CONF_MONITORED_DOMAINS,
     CONF_MULTIPLIER,
     CONF_UPDATE_INTERVAL,
+    DEFAULT_BATTERY_ONLY,
     DEFAULT_LEARNING_PERIOD,
     DEFAULT_MAX_TIMEOUT,
     DEFAULT_MIN_TIMEOUT,
@@ -260,6 +263,11 @@ class IsItDeadManager:
             entry.data.get(CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL),
         )
         self.excluded_entities = entry.options.get(CONF_EXCLUDED_ENTITIES, [])
+        self.excluded_integrations = entry.options.get(CONF_EXCLUDED_INTEGRATIONS, [])
+        self.battery_only = entry.options.get(
+            CONF_BATTERY_ONLY,
+            entry.data.get(CONF_BATTERY_ONLY, DEFAULT_BATTERY_ONLY),
+        )
 
         # Parse custom overrides (Entity ID -> Hours)
         custom_raw = entry.options.get(CONF_CUSTOM_TIMEOUTS, "")
@@ -344,8 +352,6 @@ class IsItDeadManager:
             if domain not in self.monitored_domains:
                 continue
 
-
-
             # Check if entity is managed by this integration (self-monitoring check)
             reg_entry = entity_reg.async_get(entity_id)
             if reg_entry:
@@ -353,13 +359,47 @@ class IsItDeadManager:
                     continue
                 if reg_entry.platform == DOMAIN:
                     continue
+                # Per-integration exclusion
+                if reg_entry.platform in self.excluded_integrations:
+                    continue
 
             if entity_id in self.excluded_entities:
+                continue
+
+            # Battery-only filter: skip entities whose device has no battery sensor
+            if self.battery_only and not self._is_battery_powered(entity_id, entity_reg):
                 continue
 
             monitored.append(entity_id)
 
         return monitored
+
+    def _is_battery_powered(self, entity_id: str, entity_reg: er.EntityRegistry) -> bool:
+        """Check if the device owning this entity has a battery sensor."""
+        # 1. Check if the entity itself has battery-related attributes
+        state = self.hass.states.get(entity_id)
+        if state:
+            for attr in ("battery", "battery_level", "battery_state"):
+                if attr in state.attributes:
+                    return True
+
+        # 2. Check sibling entities on the same device for a battery sensor
+        reg_entry = entity_reg.async_get(entity_id)
+        if not reg_entry or not reg_entry.device_id:
+            return False
+
+        for entry in er.async_entries_for_device(entity_reg, reg_entry.device_id):
+            # Check registry-level device_class
+            if entry.original_device_class == "battery" or entry.device_class == "battery":
+                return True
+            # Check state-level device_class and entity ID pattern
+            sibling_state = self.hass.states.get(entry.entity_id)
+            if sibling_state:
+                dc = sibling_state.attributes.get("device_class")
+                if dc == "battery":
+                    return True
+
+        return False
 
     def get_timeout_for_entity(self, entity_id: str) -> float:
         """Get calculated or custom timeout threshold (in seconds) for an entity."""

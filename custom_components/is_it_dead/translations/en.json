@@ -6,6 +6,7 @@
         "description": "Configure surveillance settings for detecting stale or dead sensors. By default, all entities in the selected domains will be monitored.",
         "data": {
           "monitored_domains": "Domains to monitor",
+          "battery_only": "Monitor battery-powered devices only",
           "learning_period": "Learning Period (Days)",
           "multiplier": "Threshold Multiplier (Average * Multiplier)",
           "min_timeout": "Minimum Timeout (Hours)",
@@ -26,6 +27,8 @@
         "description": "Adjust learning rules, update thresholds, and exclude specific entities from surveillance. Proposed exclusions (entities that have never reported) will be pre-populated.",
         "data": {
           "monitored_domains": "Domains to monitor",
+          "battery_only": "Monitor battery-powered devices only",
+          "excluded_integrations": "Integrations to exclude",
           "learning_period": "Learning Period (Days)",
           "multiplier": "Threshold Multiplier (Average * Multiplier)",
           "min_timeout": "Minimum Timeout (Hours)",

@@ -18,14 +18,17 @@ except ImportError:
     from homeassistant.data_entry_flow import FlowResult as ConfigFlowResult
 
 from .const import (
+    CONF_BATTERY_ONLY,
     CONF_CUSTOM_TIMEOUTS,
     CONF_EXCLUDED_ENTITIES,
+    CONF_EXCLUDED_INTEGRATIONS,
     CONF_LEARNING_PERIOD,
     CONF_MAX_TIMEOUT,
     CONF_MIN_TIMEOUT,
     CONF_MONITORED_DOMAINS,
     CONF_MULTIPLIER,
     CONF_UPDATE_INTERVAL,
+    DEFAULT_BATTERY_ONLY,
     DEFAULT_LEARNING_PERIOD,
     DEFAULT_MAX_TIMEOUT,
     DEFAULT_MIN_TIMEOUT,
@@ -68,6 +71,9 @@ class IsItDeadConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         mode=selector.SelectSelectorMode.LIST,
                     )
                 ),
+                vol.Required(
+                    CONF_BATTERY_ONLY, default=DEFAULT_BATTERY_ONLY
+                ): selector.BooleanSelector(),
                 vol.Required(
                     CONF_LEARNING_PERIOD, default=DEFAULT_LEARNING_PERIOD
                 ): vol.All(vol.Coerce(int), vol.Range(min=1)),
@@ -137,6 +143,13 @@ class IsItDeadOptionsFlowHandler(config_entries.OptionsFlow):
             CONF_UPDATE_INTERVAL,
             self.config_entry.data.get(CONF_UPDATE_INTERVAL, DEFAULT_UPDATE_INTERVAL),
         )
+        current_battery_only = self.config_entry.options.get(
+            CONF_BATTERY_ONLY,
+            self.config_entry.data.get(CONF_BATTERY_ONLY, DEFAULT_BATTERY_ONLY),
+        )
+        current_excluded_integrations = self.config_entry.options.get(
+            CONF_EXCLUDED_INTEGRATIONS, []
+        )
         current_excluded = self.config_entry.options.get(
             CONF_EXCLUDED_ENTITIES, []
         )
@@ -183,6 +196,20 @@ class IsItDeadOptionsFlowHandler(config_entries.OptionsFlow):
         # Merge current excluded list and proposed exclusions
         suggested_exclusions = list(set(current_excluded + proposed_exclusions))
 
+        # Dynamically discover all integrations that provide entities in monitored domains
+        from homeassistant.helpers import entity_registry as er
+        entity_reg = er.async_get(self.hass)
+        discovered_integrations: set[str] = set()
+        for state in self.hass.states.async_all():
+            domain = state.entity_id.split(".")[0]
+            if domain in current_domains:
+                reg_entry = entity_reg.async_get(state.entity_id)
+                if reg_entry and reg_entry.platform:
+                    discovered_integrations.add(reg_entry.platform)
+        # Remove our own integration from the list
+        discovered_integrations.discard(DOMAIN)
+        integration_options = sorted(discovered_integrations)
+
         options_schema = vol.Schema(
             {
                 vol.Required(
@@ -192,6 +219,19 @@ class IsItDeadOptionsFlowHandler(config_entries.OptionsFlow):
                         options=["sensor", "binary_sensor", "device_tracker", "climate"],
                         multiple=True,
                         mode=selector.SelectSelectorMode.LIST,
+                    )
+                ),
+                vol.Required(
+                    CONF_BATTERY_ONLY, default=current_battery_only
+                ): selector.BooleanSelector(),
+                vol.Optional(
+                    CONF_EXCLUDED_INTEGRATIONS, default=current_excluded_integrations
+                ): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=integration_options,
+                        multiple=True,
+                        mode=selector.SelectSelectorMode.DROPDOWN,
+                        custom_value=False,
                     )
                 ),
                 vol.Required(

@@ -436,11 +436,20 @@ class IsItDeadManager:
     def _rebuild_device_map(self) -> None:
         """Build the device_id -> [entity_ids] mapping from registries."""
         entity_reg = er.async_get(self.hass)
-        dev_reg = dr.async_get(self.hass)
 
         self._device_entity_map = {}
         self._entity_to_device = {}
-        standalone = []
+        # Cache battery check results per device to avoid redundant lookups
+        battery_check_cache: dict[str, bool] = {}
+
+        total_states = 0
+        domain_matched = 0
+        skipped_disabled = 0
+        skipped_self = 0
+        skipped_integration = 0
+        skipped_excluded = 0
+        skipped_standalone = 0
+        skipped_battery = 0
 
         for state in self.hass.states.async_all():
             entity_id = state.entity_id
@@ -448,17 +457,23 @@ class IsItDeadManager:
 
             if domain not in self.monitored_domains:
                 continue
+            total_states += 1
+            domain_matched += 1
 
             reg_entry = entity_reg.async_get(entity_id)
             if reg_entry:
                 if reg_entry.disabled_by is not None:
+                    skipped_disabled += 1
                     continue
                 if reg_entry.platform == DOMAIN:
+                    skipped_self += 1
                     continue
                 if reg_entry.platform in self.excluded_integrations:
+                    skipped_integration += 1
                     continue
 
             if entity_id in self.excluded_entities:
+                skipped_excluded += 1
                 continue
 
             # Determine device_id
@@ -468,15 +483,21 @@ class IsItDeadManager:
             else:
                 # Standalone entity (no device)
                 if self.standalone_entities == "ignore":
+                    skipped_standalone += 1
                     continue
                 elif self.standalone_entities == "group":
                     device_id = "__standalone__"
                 else:  # "track" — each gets its own virtual device
                     device_id = f"__standalone_{entity_id}__"
 
-            # Battery-only filter: check at device level
-            if self.battery_only and device_id != "__standalone__" and not device_id.startswith("__standalone_"):
-                if not self._is_device_battery_powered(device_id, entity_reg):
+            # Battery-only filter: check at device level (cached)
+            if self.battery_only and not device_id.startswith("__"):
+                if device_id not in battery_check_cache:
+                    battery_check_cache[device_id] = self._is_device_battery_powered(
+                        device_id, entity_reg
+                    )
+                if not battery_check_cache[device_id]:
+                    skipped_battery += 1
                     continue
 
             self._device_entity_map.setdefault(device_id, [])
@@ -484,22 +505,42 @@ class IsItDeadManager:
                 self._device_entity_map[device_id].append(entity_id)
             self._entity_to_device[entity_id] = device_id
 
+        _LOGGER.info(
+            "Device map built: %d devices, %d entities tracked "
+            "(domain_matched=%d, skipped: disabled=%d, self=%d, integration=%d, "
+            "excluded=%d, standalone=%d, battery=%d)",
+            len(self._device_entity_map),
+            sum(len(v) for v in self._device_entity_map.values()),
+            domain_matched,
+            skipped_disabled,
+            skipped_self,
+            skipped_integration,
+            skipped_excluded,
+            skipped_standalone,
+            skipped_battery,
+        )
+
     def _is_device_battery_powered(self, device_id: str, entity_reg: er.EntityRegistry) -> bool:
         """Check if a device has any battery sensor among its entities."""
-        for entry in er.async_entries_for_device(entity_reg, device_id):
-            # Check registry-level device_class
-            if entry.original_device_class == "battery" or entry.device_class == "battery":
-                return True
-            # Check state-level device_class
-            sibling_state = self.hass.states.get(entry.entity_id)
-            if sibling_state:
-                dc = sibling_state.attributes.get("device_class")
-                if dc == "battery":
+        try:
+            for entry in er.async_entries_for_device(entity_reg, device_id):
+                # Check registry-level device_class (use getattr for compat)
+                orig_dc = getattr(entry, "original_device_class", None)
+                entry_dc = getattr(entry, "device_class", None)
+                if orig_dc == "battery" or entry_dc == "battery":
                     return True
-                # Also check for battery attributes
-                for attr in ("battery", "battery_level", "battery_state"):
-                    if attr in sibling_state.attributes:
+                # Check state-level device_class
+                sibling_state = self.hass.states.get(entry.entity_id)
+                if sibling_state:
+                    dc = sibling_state.attributes.get("device_class")
+                    if dc == "battery":
                         return True
+                    # Also check for battery attributes
+                    for attr in ("battery", "battery_level", "battery_state"):
+                        if attr in sibling_state.attributes:
+                            return True
+        except Exception as err:
+            _LOGGER.debug("Error checking battery for device %s: %s", device_id, err)
         return False
 
     def get_monitored_devices(self) -> dict[str, dict[str, Any]]:

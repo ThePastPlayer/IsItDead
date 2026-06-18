@@ -81,9 +81,9 @@ class IsItDeadConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 ): selector.SelectSelector(
                     selector.SelectSelectorConfig(
                         options=[
-                            selector.SelectOptionDict(value="ignore", label="Ignore (Recommended)"),
-                            selector.SelectOptionDict(value="group", label="Group under 'No Device'"),
-                            selector.SelectOptionDict(value="track", label="Track individually"),
+                            {"value": "ignore", "label": "Ignore (Recommended)"},
+                            {"value": "group", "label": "Group under 'No Device'"},
+                            {"value": "track", "label": "Track individually"},
                         ],
                         mode=selector.SelectSelectorMode.DROPDOWN,
                     )
@@ -247,9 +247,9 @@ class IsItDeadOptionsFlowHandler(config_entries.OptionsFlow):
                 ): selector.SelectSelector(
                     selector.SelectSelectorConfig(
                         options=[
-                            selector.SelectOptionDict(value="ignore", label="Ignore (Recommended)"),
-                            selector.SelectOptionDict(value="group", label="Group under 'No Device'"),
-                            selector.SelectOptionDict(value="track", label="Track individually"),
+                            {"value": "ignore", "label": "Ignore (Recommended)"},
+                            {"value": "group", "label": "Group under 'No Device'"},
+                            {"value": "track", "label": "Track individually"},
                         ],
                         mode=selector.SelectSelectorMode.DROPDOWN,
                     )

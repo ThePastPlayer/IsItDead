@@ -32,5 +32,5 @@ DEFAULT_STANDALONE_ENTITIES = "ignore"
 
 # Storage settings
 STORAGE_KEY = f"{DOMAIN}.learned_data"
-STORAGE_VERSION = 2
+STORAGE_VERSION = 1
 

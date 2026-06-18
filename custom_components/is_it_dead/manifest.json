@@ -3,9 +3,10 @@
   "name": "Is It Dead?",
   "codeowners": [],
   "config_flow": true,
+  "integration_type": "hub",
   "iot_class": "local_polling",
   "version": "1.0.0",
-  "dependencies": ["recorder"],
+  "dependencies": ["frontend", "recorder"],
   "documentation": "https://github.com/ThePastPlayer/IsItDead",
   "issue_tracker": "https://github.com/ThePastPlayer/IsItDead/issues"
 }

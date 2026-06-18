@@ -1,7 +1,11 @@
 """Constants for the Is It Dead? integration."""
+try:
+    from homeassistant.const import Platform
+    PLATFORMS = [Platform.BINARY_SENSOR]
+except ImportError:
+    PLATFORMS = ["binary_sensor"]
 
 DOMAIN = "is_it_dead"
-PLATFORMS = ["binary_sensor"]
 
 # Configuration keys
 CONF_MONITORED_DOMAINS = "monitored_domains"

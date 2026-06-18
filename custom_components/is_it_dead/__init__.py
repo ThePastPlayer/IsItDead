@@ -11,7 +11,7 @@ import yaml
 from typing import Any
 import voluptuous as vol
 
-from homeassistant.components.frontend import async_register_panel, async_remove_panel
+
 import homeassistant.helpers.config_validation as cv
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
@@ -73,6 +73,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         pass  # Already registered from a previous load
 
     # Register the sidebar panel
+    from homeassistant.components.frontend import async_register_panel
     async_register_panel(
         hass,
         frontend_url_path="is_it_dead",
@@ -208,6 +209,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unload_ok:
         # Remove the sidebar panel
+        from homeassistant.components.frontend import async_remove_panel
         async_remove_panel(hass, "is_it_dead")
 
         manager = hass.data[DOMAIN].pop(entry.entry_id)

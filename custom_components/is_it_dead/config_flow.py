@@ -91,7 +91,7 @@ class IsItDeadConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         config_entry: config_entries.ConfigEntry,
     ) -> config_entries.OptionsFlow:
         """Get the options flow for this handler."""
-        return IsItDeadOptionsFlowHandler(config_entry)
+        return IsItDeadOptionsFlowHandler()
 
 
 class IsItDeadOptionsFlowHandler(config_entries.OptionsFlow):

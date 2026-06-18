@@ -54,7 +54,7 @@ action:
             id: alert_triggered
         sequence:
           - variables:
-              notify_service: "notify.mobile_app_{{ device_attr(notify_device, 'name') | lower | replace(' ', '_') | replace('-', '_') }}"
+              notify_service: "notify.mobile_app_{{ device_attr(notify_device, 'name') | slugify }}"
               dead_list: "{{ state_attr(alert_sensor, 'dead_entities') }}"
           - service: "{{ notify_service }}"
             data:

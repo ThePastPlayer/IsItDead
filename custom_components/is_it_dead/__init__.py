@@ -63,12 +63,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Forward setup to platforms (binary_sensor)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
-    # Register the frontend static directory
-    hass.http.register_static_path(
-        url="/is_it_dead_ui",
-        path=hass.config.path("custom_components/is_it_dead/frontend"),
-        cache_headers=False,
-    )
+    # Register the frontend static directory (guard against re-registration on reload)
+    try:
+        hass.http.register_static_path(
+            url="/is_it_dead_ui",
+            path=hass.config.path("custom_components/is_it_dead/frontend"),
+            cache_headers=False,
+        )
+    except Exception:  # noqa: BLE001
+        pass  # Already registered from a previous load
 
     # Register the sidebar panel
     async_register_panel(
@@ -80,13 +83,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         module_url="/is_it_dead_ui/is_it_dead_panel.js",
     )
 
-    # Copy blueprint to local blueprints directory
+    # Copy blueprint to local blueprints directory (run blocking I/O in executor)
     blueprint_src = hass.config.path("custom_components/is_it_dead/blueprints/is_it_dead_alert.yaml")
     blueprint_dest_dir = hass.config.path("blueprints/automation/is_it_dead")
     blueprint_dest = os.path.join(blueprint_dest_dir, "is_it_dead_alert.yaml")
-    try:
+
+    def _copy_blueprint() -> None:
         os.makedirs(blueprint_dest_dir, exist_ok=True)
         shutil.copy(blueprint_src, blueprint_dest)
+
+    try:
+        await hass.async_add_executor_job(_copy_blueprint)
         _LOGGER.info("Copied actionable alert blueprint successfully")
     except Exception as err:
         _LOGGER.error("Failed to copy actionable blueprint: %s", err)
@@ -336,8 +343,7 @@ class IsItDeadManager:
             if domain not in self.monitored_domains:
                 continue
 
-            if domain == DOMAIN:
-                continue
+
 
             # Check if entity is managed by this integration (self-monitoring check)
             reg_entry = entity_reg.async_get(entity_id)
@@ -370,9 +376,7 @@ class IsItDeadManager:
             max_sec = self.max_timeout * 3600.0
             return max(min(timeout, max_sec), min_sec)
 
-        # 3. Fallback: use maximum timeout during learning, or default maximum timeout
-        if self.is_learning():
-            return self.max_timeout * 3600.0
+        # 3. Fallback: use maximum timeout (learning or otherwise)
         return self.max_timeout * 3600.0
 
     def update_learned_data(self, entity_id: str, interval: float, count: int = 1) -> None:
@@ -534,15 +538,23 @@ class IsItDeadManager:
 
     async def async_backfill_history(self) -> None:
         """Backfill average intervals using recorder history (runs in background)."""
-        # Wait for the recorder database to be fully initialized and connected
-        from homeassistant.components.recorder import DOMAIN as RECORDER_DOMAIN
-        if RECORDER_DOMAIN in self.hass.data:
-            recorder = self.hass.data[RECORDER_DOMAIN]
-            if hasattr(recorder, "db_connected"):
-                try:
-                    await recorder.db_connected
-                except Exception as err:
-                    _LOGGER.error("Error waiting for recorder connection: %s", err)
+        # Wait for the recorder database to be fully initialized
+        try:
+            from homeassistant.components.recorder import get_instance
+            recorder = get_instance(self.hass)
+            await recorder.async_db_ready
+        except (ImportError, AttributeError):
+            # Fallback for older HA versions
+            from homeassistant.components.recorder import DOMAIN as RECORDER_DOMAIN
+            if RECORDER_DOMAIN in self.hass.data:
+                recorder = self.hass.data[RECORDER_DOMAIN]
+                if hasattr(recorder, "db_connected"):
+                    try:
+                        await recorder.db_connected
+                    except Exception as err:
+                        _LOGGER.error("Error waiting for recorder connection: %s", err)
+        except Exception as err:
+            _LOGGER.error("Error waiting for recorder: %s", err)
 
         _LOGGER.info("Starting background history backfill for 'Is It Dead?'")
         entity_ids = self.get_monitored_entities()

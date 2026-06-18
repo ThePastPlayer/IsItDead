@@ -85,9 +85,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     blueprint_dest_dir = hass.config.path("blueprints/automation/is_it_dead")
     blueprint_dest = os.path.join(blueprint_dest_dir, "is_it_dead_alert.yaml")
     try:
-            os.makedirs(blueprint_dest_dir, exist_ok=True)
-            shutil.copy(blueprint_src, blueprint_dest)
-            _LOGGER.info("Copied actionable alert blueprint successfully")
+        os.makedirs(blueprint_dest_dir, exist_ok=True)
+        shutil.copy(blueprint_src, blueprint_dest)
+        _LOGGER.info("Copied actionable alert blueprint successfully")
     except Exception as err:
         _LOGGER.error("Failed to copy actionable blueprint: %s", err)
 

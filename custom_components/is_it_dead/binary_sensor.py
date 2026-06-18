@@ -121,15 +121,21 @@ class IsItDeadSensor(BinarySensorEntity):
             ir.async_delete_issue(self.hass, DOMAIN, issue_id)
 
     def _resolve_battery_type(self) -> str:
-        """Resolve the battery type for this device."""
+        """Resolve the battery type for this device from Battery Notes or a battery_type sensor."""
         entity_reg = er.async_get(self.hass)
         reg_entry = entity_reg.async_get(self.monitored_entity_id)
         if reg_entry and reg_entry.device_id:
             for entry in er.async_entries_for_device(entity_reg, reg_entry.device_id):
-                if entry.domain == "sensor" and entry.entity_id.endswith("_battery_type"):
+                if entry.domain == "sensor":
                     sensor_state = self.hass.states.get(entry.entity_id)
                     if sensor_state:
-                        return str(sensor_state.state)
+                        # Battery Notes: battery_type attribute on the battery sensor
+                        bat_type_attr = sensor_state.attributes.get("battery_type")
+                        if bat_type_attr:
+                            return str(bat_type_attr)
+                        # Fallback: entity whose ID ends with _battery_type
+                        if entry.entity_id.endswith("_battery_type"):
+                            return str(sensor_state.state)
         return "Unknown"
 
     @property

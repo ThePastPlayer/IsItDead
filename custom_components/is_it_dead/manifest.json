@@ -6,6 +6,6 @@
   "iot_class": "local_polling",
   "version": "1.0.0",
   "dependencies": ["recorder"],
-  "documentation": "https://github.com/hacs/integration",
-  "issue_tracker": "https://github.com/hacs/integration/issues"
+  "documentation": "https://github.com/ThePastPlayer/IsItDead",
+  "issue_tracker": "https://github.com/ThePastPlayer/IsItDead/issues"
 }

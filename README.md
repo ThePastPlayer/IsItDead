@@ -1,7 +1,7 @@
 # ⚡ Is It Dead? (is_it_dead)
 
 [![HACS Custom Badge](https://img.shields.io/badge/HACS-Custom-orange.svg?style=for-the-badge)](https://github.com/hacs/integration)
-[![Open your Home Assistant instance and open a repository in HACS.](https://my.home-assistant.io/badge/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=ThePastPlayer&repository=IsItDead&category=integration)
+[![Open your Home Assistant instance and open a repository in HACS.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=ThePastPlayer&repository=IsItDead&category=integration)
 
 **Is It Dead?** is a HACS-compatible Home Assistant custom integration designed to monitor rechargeable battery-powered Zigbee end devices and other sensors for sudden range/battery silences. 
 
@@ -27,7 +27,7 @@ Rather than relying on static, arbitrary timeout rules (which fail for devices w
 
 Click the button below to automatically add this repository to HACS and open the setup panel:
 
-[![Open your Home Assistant instance and open a repository in HACS.](https://my.home-assistant.io/badge/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=ThePastPlayer&repository=IsItDead&category=integration)
+[![Open your Home Assistant instance and open a repository in HACS.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=ThePastPlayer&repository=IsItDead&category=integration)
 
 ---
 

@@ -27,6 +27,7 @@ from .const import (
     CONF_MIN_TIMEOUT,
     CONF_MONITORED_DOMAINS,
     CONF_MULTIPLIER,
+    CONF_STANDALONE_ENTITIES,
     CONF_UPDATE_INTERVAL,
     DEFAULT_BATTERY_ONLY,
     DEFAULT_LEARNING_PERIOD,
@@ -34,6 +35,7 @@ from .const import (
     DEFAULT_MIN_TIMEOUT,
     DEFAULT_MONITORED_DOMAINS,
     DEFAULT_MULTIPLIER,
+    DEFAULT_STANDALONE_ENTITIES,
     DEFAULT_UPDATE_INTERVAL,
     DOMAIN,
     STORAGE_KEY,
@@ -74,6 +76,18 @@ class IsItDeadConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 vol.Required(
                     CONF_BATTERY_ONLY, default=DEFAULT_BATTERY_ONLY
                 ): selector.BooleanSelector(),
+                vol.Required(
+                    CONF_STANDALONE_ENTITIES, default=DEFAULT_STANDALONE_ENTITIES
+                ): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=[
+                            selector.SelectOptionDict(value="ignore", label="Ignore (Recommended)"),
+                            selector.SelectOptionDict(value="group", label="Group under 'No Device'"),
+                            selector.SelectOptionDict(value="track", label="Track individually"),
+                        ],
+                        mode=selector.SelectSelectorMode.DROPDOWN,
+                    )
+                ),
                 vol.Required(
                     CONF_LEARNING_PERIOD, default=DEFAULT_LEARNING_PERIOD
                 ): vol.All(vol.Coerce(int), vol.Range(min=1)),
@@ -146,6 +160,10 @@ class IsItDeadOptionsFlowHandler(config_entries.OptionsFlow):
         current_battery_only = self.config_entry.options.get(
             CONF_BATTERY_ONLY,
             self.config_entry.data.get(CONF_BATTERY_ONLY, DEFAULT_BATTERY_ONLY),
+        )
+        current_standalone = self.config_entry.options.get(
+            CONF_STANDALONE_ENTITIES,
+            self.config_entry.data.get(CONF_STANDALONE_ENTITIES, DEFAULT_STANDALONE_ENTITIES),
         )
         current_excluded_integrations = self.config_entry.options.get(
             CONF_EXCLUDED_INTEGRATIONS, []
@@ -224,6 +242,18 @@ class IsItDeadOptionsFlowHandler(config_entries.OptionsFlow):
                 vol.Required(
                     CONF_BATTERY_ONLY, default=current_battery_only
                 ): selector.BooleanSelector(),
+                vol.Required(
+                    CONF_STANDALONE_ENTITIES, default=current_standalone
+                ): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=[
+                            selector.SelectOptionDict(value="ignore", label="Ignore (Recommended)"),
+                            selector.SelectOptionDict(value="group", label="Group under 'No Device'"),
+                            selector.SelectOptionDict(value="track", label="Track individually"),
+                        ],
+                        mode=selector.SelectSelectorMode.DROPDOWN,
+                    )
+                ),
                 vol.Optional(
                     CONF_EXCLUDED_INTEGRATIONS, default=current_excluded_integrations
                 ): selector.SelectSelector(

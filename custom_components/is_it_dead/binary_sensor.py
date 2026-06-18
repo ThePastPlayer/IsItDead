@@ -1,4 +1,4 @@
-"""Binary sensor platform for Is It Dead?."""
+"""Binary sensor platform for Is It Dead? — Device-centric (v2)."""
 from __future__ import annotations
 
 import logging
@@ -9,14 +9,8 @@ from homeassistant.components.binary_sensor import (
     BinarySensorEntity,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers import (
-    area_registry as ar,
-    device_registry as dr,
-    entity_registry as er,
-    issue_registry as ir,
-)
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.util import dt as dt_util
 
@@ -30,78 +24,82 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up the Is It Dead? binary sensors."""
+    """Set up the Is It Dead? binary sensors — one per device."""
     manager = hass.data[DOMAIN][entry.entry_id]
 
-    added_entities: set[str] = set()
+    added_devices: set[str] = set()
 
     @callback
-    def async_add_new_entities(entity_ids: list[str]) -> None:
-        """Dynamically add new binary sensors for discovered entities."""
+    def async_add_new_devices(device_ids: list[str]) -> None:
+        """Dynamically add new binary sensors for discovered devices."""
         sensors = []
-        for entity_id in entity_ids:
-            if entity_id in added_entities:
+        for device_id in device_ids:
+            if device_id in added_devices:
                 continue
-            added_entities.add(entity_id)
-            sensors.append(IsItDeadSensor(manager, entity_id))
+            added_devices.add(device_id)
+            sensors.append(IsItDeadDeviceSensor(manager, device_id))
 
         if sensors:
-            _LOGGER.info("Adding %d new dead-sensor trackers", len(sensors))
+            _LOGGER.info("Adding %d new device health trackers", len(sensors))
             async_add_entities(sensors)
 
-    # Register the callback in the manager so new entities are discovered dynamically
-    manager.async_add_new_entities_callback = async_add_new_entities
+    # Register the callback so new devices are discovered dynamically
+    manager.async_add_new_devices_callback = async_add_new_devices
 
     # Add the aggregate alert sensor first
     alert_sensor = IsItDeadAlert(manager)
     async_add_entities([alert_sensor])
 
-    # Initial load of monitored entities
-    async_add_new_entities(manager.get_monitored_entities())
+    # Initial load of monitored devices
+    devices = manager.get_monitored_devices()
+    async_add_new_devices(list(devices.keys()))
 
 
-class IsItDeadSensor(BinarySensorEntity):
-    """Binary sensor representing whether a single monitored entity is dead."""
+class IsItDeadDeviceSensor(BinarySensorEntity):
+    """Binary sensor representing whether a physical device is dead.
+
+    One sensor per tracked device. Aggregates health across all entities
+    belonging to the device.
+    """
 
     _attr_device_class = BinarySensorDeviceClass.PROBLEM
     _attr_should_poll = False
 
-    def __init__(self, manager: Any, monitored_entity_id: str) -> None:
-        """Initialize the sensor."""
+    def __init__(self, manager: Any, tracked_device_id: str) -> None:
+        """Initialize the device sensor."""
         self.manager = manager
-        self.monitored_entity_id = monitored_entity_id
+        self.tracked_device_id = tracked_device_id
 
-        # Unique ID based on the monitored entity
-        self._attr_unique_id = f"is_it_dead_{monitored_entity_id}"
+        # Unique ID based on the tracked device
+        self._attr_unique_id = f"is_it_dead_device_{tracked_device_id}"
 
     async def async_added_to_hass(self) -> None:
         """Register subscription listener when added to Home Assistant."""
         self.async_on_remove(self.manager.subscribe(self._async_on_manager_update))
-        # Initial check for Repairs issue registry
         self._async_manage_repairs_issue()
 
     async def async_will_remove_from_hass(self) -> None:
         """Clean up repairs issue when entity is removed."""
-        ir.async_delete_issue(self.hass, DOMAIN, f"sensor_dead_{self.monitored_entity_id}")
+        ir.async_delete_issue(self.hass, DOMAIN, f"device_dead_{self.tracked_device_id}")
 
     @callback
-    def _async_on_manager_update(self, entity_id: str | None) -> None:
+    def _async_on_manager_update(self, device_id: str | None) -> None:
         """Handle status update event from the manager."""
-        if entity_id is None or entity_id == self.monitored_entity_id:
+        if device_id is None or device_id == self.tracked_device_id:
             self._async_manage_repairs_issue()
             self.async_write_ha_state()
 
     @callback
     def _async_manage_repairs_issue(self) -> None:
-        """Raise or dismiss a Repairs issue based on sensor state."""
-        issue_id = f"sensor_dead_{self.monitored_entity_id}"
+        """Raise or dismiss a Repairs issue based on device health."""
+        issue_id = f"device_dead_{self.tracked_device_id}"
+        health = self._get_health()
 
-        if self.is_dead_raw:
-            state = self.hass.states.get(self.monitored_entity_id)
-            friendly_name = state.name if state else self.monitored_entity_id
-
-            # Resolve battery type
-            battery_type = self._resolve_battery_type()
+        if health["health_status"] == "dead":
+            devices = self.manager.get_monitored_devices()
+            device_info = devices.get(self.tracked_device_id, {})
+            device_name = device_info.get("name", self.tracked_device_id)
+            battery_type = self.manager.resolve_battery_type(self.tracked_device_id)
 
             ir.async_create_issue(
                 self.hass,
@@ -111,167 +109,119 @@ class IsItDeadSensor(BinarySensorEntity):
                 severity=ir.IssueSeverity.WARNING,
                 translation_key="sensor_dead",
                 translation_placeholders={
-                    "name": friendly_name,
-                    "entity_id": self.monitored_entity_id,
+                    "name": device_name,
+                    "entity_id": self.tracked_device_id,
                     "battery_type": battery_type,
                 },
             )
         else:
             ir.async_delete_issue(self.hass, DOMAIN, issue_id)
 
-    def _resolve_battery_type(self) -> str:
-        """Resolve the battery type for this device from Battery Notes or a battery_type sensor."""
-        entity_reg = er.async_get(self.hass)
-        reg_entry = entity_reg.async_get(self.monitored_entity_id)
-        if reg_entry and reg_entry.device_id:
-            for entry in er.async_entries_for_device(entity_reg, reg_entry.device_id):
-                if entry.domain == "sensor":
-                    sensor_state = self.hass.states.get(entry.entity_id)
-                    if sensor_state:
-                        # Battery Notes: battery_type attribute on the battery sensor
-                        bat_type_attr = sensor_state.attributes.get("battery_type")
-                        if bat_type_attr:
-                            return str(bat_type_attr)
-                        # Fallback: entity whose ID ends with _battery_type
-                        if entry.entity_id.endswith("_battery_type"):
-                            return str(sensor_state.state)
-        return "Unknown"
+    def _get_health(self) -> dict[str, Any]:
+        """Get cached or computed health evaluation."""
+        return self.manager.evaluate_device_health(self.tracked_device_id)
 
     @property
     def name(self) -> str:
         """Return the name of the binary sensor."""
-        state = self.hass.states.get(self.monitored_entity_id)
-        if state and state.name:
-            return f"{state.name} Is Dead"
-        entity_name = self.monitored_entity_id.split(".")[-1]
-        return f"{entity_name.replace('_', ' ').title()} Is Dead"
+        devices = self.manager.get_monitored_devices()
+        device_info = devices.get(self.tracked_device_id, {})
+        name = device_info.get("name", self.tracked_device_id)
+        return f"{name} Is Dead"
 
     @property
     def is_on(self) -> bool:
-        """Return True if the monitored entity is considered dead and not muted/snoozed."""
-        # 1. Check if snooze is active
-        snooze_until_str = self.manager.learned_data.get("snoozed", {}).get(self.monitored_entity_id)
-        if snooze_until_str:
-            snooze_until = dt_util.parse_datetime(snooze_until_str)
-            if snooze_until and dt_util.utcnow() < snooze_until:
-                return False
+        """Return True if the device is considered dead and not snoozed."""
+        # Check if any entity on this device is snoozed
+        snoozed = self.manager.learned_data.get("snoozed", {})
+        entity_ids = self.manager.get_entities_for_device(self.tracked_device_id)
+        all_snoozed = entity_ids and all(
+            snoozed.get(eid) and dt_util.parse_datetime(snoozed[eid])
+            and dt_util.utcnow() < dt_util.parse_datetime(snoozed[eid])
+            for eid in entity_ids
+        )
+        if all_snoozed:
+            return False
 
-        # 2. Evaluate raw dead state
-        return self.is_dead_raw
-
-    @property
-    def is_dead_raw(self) -> bool:
-        """Evaluate if the sensor has timed out (ignoring snooze)."""
-        state = self.hass.states.get(self.monitored_entity_id)
-
-        # If it doesn't exist in state machine, it's dead
-        if not state:
-            return True
-
-        # If unavailable or unknown, it's offline/dead
-        if state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
-            return True
-
-        # Retrieve last reported timestamp
-        last_reported = state.last_reported or state.last_updated
-        if not last_reported:
-            entities_data = self.manager.learned_data.get("entities", {})
-            entity_info = entities_data.get(self.monitored_entity_id)
-            if entity_info and "last_report_ts" in entity_info:
-                last_reported = dt_util.parse_datetime(entity_info["last_report_ts"])
-
-        if not last_reported:
-            if self.manager.is_learning():
-                return False
-            return True
-
-        elapsed = (dt_util.utcnow() - last_reported).total_seconds()
-        timeout = self.manager.get_timeout_for_entity(self.monitored_entity_id)
-
-        return elapsed > timeout
+        health = self._get_health()
+        return health["health_status"] == "dead"
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        """Return entity specific state attributes."""
-        state = self.hass.states.get(self.monitored_entity_id)
+        """Return device-level state attributes for the frontend panel."""
+        devices = self.manager.get_monitored_devices()
+        device_info = devices.get(self.tracked_device_id, {})
+        health = self._get_health()
 
-        last_reported = None
-        if state:
-            last_reported = state.last_reported or state.last_updated
+        # Battery info
+        battery_entity_id, battery_level = self.manager.get_battery_info_for_device(
+            self.tracked_device_id
+        )
+        depletion = self.manager.estimate_battery_depletion(self.tracked_device_id)
+        battery_type = self.manager.resolve_battery_type(self.tracked_device_id)
 
-        entities_data = self.manager.learned_data.get("entities", {})
-        entity_info = entities_data.get(self.monitored_entity_id) or {}
-
-        if not last_reported and "last_report_ts" in entity_info:
-            last_reported = dt_util.parse_datetime(entity_info["last_report_ts"])
-
-        timeout = self.manager.get_timeout_for_entity(self.monitored_entity_id)
-        average_interval = entity_info.get("average_interval", 0.0)
-        report_count = entity_info.get("count", 0)
-
-        elapsed = None
-        if last_reported:
-            elapsed = (dt_util.utcnow() - last_reported).total_seconds()
-
-        # Resolve battery data dynamically
-        battery_entity_id, battery_level = self.manager.get_battery_info(self.monitored_entity_id)
-        depletion = self.manager.estimate_battery_depletion(self.monitored_entity_id)
-
-        # Pre-emptive low-battery warning prediction (< 7 days)
         low_battery_warning = False
         if depletion and depletion.get("depletion_days") is not None:
             if depletion["depletion_days"] < 7.0:
                 low_battery_warning = True
 
-        # Resolve Area registry metadata
-        area_id = None
-        area_name = None
-        entity_reg = er.async_get(self.hass)
-        reg_entry = entity_reg.async_get(self.monitored_entity_id)
-        if reg_entry:
-            area_id = reg_entry.area_id
-            if not area_id and reg_entry.device_id:
-                dev_reg = dr.async_get(self.hass)
-                device = dev_reg.async_get(reg_entry.device_id)
-                if device:
-                    area_id = device.area_id
+        # Timeout info
+        timeout = self.manager.get_timeout_for_device(self.tracked_device_id)
 
-            if area_id:
-                area_reg = ar.async_get(self.hass)
-                area = area_reg.async_get(area_id)
-                if area:
-                    area_name = area.name
+        # Report count — sum across all entities
+        entities_data = self.manager.learned_data.get("entities", {})
+        total_reports = 0
+        best_avg_interval = None
+        for eid in device_info.get("entities", []):
+            ei = entities_data.get(eid, {})
+            total_reports += ei.get("count", 0)
+            avg = ei.get("average_interval", 0.0)
+            if avg > 0 and (best_avg_interval is None or avg < best_avg_interval):
+                best_avg_interval = avg
 
-        # Resolve Battery Type (e.g. from Battery Notes)
-        battery_type = self._resolve_battery_type()
-
-        # Resolve Snooze
-        snooze_until_str = self.manager.learned_data.get("snoozed", {}).get(self.monitored_entity_id)
-        snooze_active = False
-        if snooze_until_str:
-            snooze_until = dt_util.parse_datetime(snooze_until_str)
-            if snooze_until and dt_util.utcnow() < snooze_until:
-                snooze_active = True
+        # Snooze check
+        snoozed = self.manager.learned_data.get("snoozed", {})
+        snooze_until = None
+        for eid in device_info.get("entities", []):
+            s = snoozed.get(eid)
+            if s:
+                parsed = dt_util.parse_datetime(s)
+                if parsed and dt_util.utcnow() < parsed:
+                    snooze_until = s
+                    break
 
         return {
-            "monitored_entity_id": self.monitored_entity_id,
-            "last_reported": last_reported.isoformat() if last_reported else None,
-            "seconds_since_last_report": round(elapsed, 1) if elapsed is not None else None,
-            "timeout_threshold_seconds": round(timeout, 1),
+            # Device identification
+            "tracked_device_id": self.tracked_device_id,
+            "device_name": device_info.get("name", "Unknown"),
+            "manufacturer": device_info.get("manufacturer"),
+            "model": device_info.get("model"),
+            "area_name": device_info.get("area_name"),
+            "integrations": device_info.get("integrations", []),
+            # Entity info
+            "entity_count": len(device_info.get("entities", [])),
+            "entities": device_info.get("entities", []),
+            # Health status
+            "health_status": health["health_status"],
+            "last_activity": health.get("last_activity"),
+            "last_active_entity": health.get("last_active_entity"),
+            "silent_entities": health.get("silent_entities", []),
+            "active_entities": health.get("active_entities", []),
+            "entity_details": health.get("entity_details", []),
+            # Timing
+            "average_report_interval_hours": round(best_avg_interval / 3600.0, 2) if best_avg_interval else 0,
             "timeout_threshold_hours": round(timeout / 3600.0, 2),
-            "average_report_interval_seconds": round(average_interval, 1),
-            "average_report_interval_hours": round(average_interval / 3600.0, 2),
-            "report_count": report_count,
-            "learning_active": self.manager.is_learning(),
+            "report_count": total_reports,
+            # Battery
             "battery_entity_id": battery_entity_id,
             "battery_level": battery_level,
-            "battery_depletion_estimate": depletion,
             "battery_type": battery_type,
-            "area_id": area_id,
-            "area_name": area_name,
+            "battery_depletion_estimate": depletion,
             "low_battery_warning": low_battery_warning,
-            "snooze_until": snooze_until_str if snooze_active else None,
-            "is_dead_raw": self.is_dead_raw,
+            # Status flags
+            "learning_active": self.manager.is_learning(),
+            "snooze_until": snooze_until,
+            "is_dead_raw": health["health_status"] == "dead",
         }
 
 
@@ -292,119 +242,95 @@ class IsItDeadAlert(BinarySensorEntity):
         self.async_on_remove(self.manager.subscribe(self._async_on_manager_update))
 
     @callback
-    def _async_on_manager_update(self, entity_id: str | None) -> None:
-        """Update aggregate state on any entity change or check trigger."""
-        if self.manager.async_add_new_entities_callback:
-            self.manager.async_add_new_entities_callback(
-                self.manager.get_monitored_entities()
-            )
+    def _async_on_manager_update(self, device_id: str | None) -> None:
+        """Update aggregate state on any device change or check trigger."""
+        # Dynamically discover new devices
+        if self.manager.async_add_new_devices_callback:
+            devices = self.manager.get_monitored_devices()
+            self.manager.async_add_new_devices_callback(list(devices.keys()))
         self.async_write_ha_state()
 
     @property
     def is_on(self) -> bool:
-        """Return True if any of the monitored entities are currently dead and not snoozed."""
-        monitored = self.manager.get_monitored_entities()
-        entities_data = self.manager.learned_data.get("entities", {})
+        """Return True if any monitored device is currently dead (and not snoozed)."""
+        devices = self.manager.get_monitored_devices()
+        snoozed = self.manager.learned_data.get("snoozed", {})
 
-        for entity_id in monitored:
-            # Skip checking if snoozed
-            snooze_until_str = self.manager.learned_data.get("snoozed", {}).get(entity_id)
-            if snooze_until_str:
-                snooze_until = dt_util.parse_datetime(snooze_until_str)
-                if snooze_until and dt_util.utcnow() < snooze_until:
-                    continue
+        for device_id, device_info in devices.items():
+            # Check if entire device is snoozed
+            entity_ids = device_info.get("entities", [])
+            all_snoozed = entity_ids and all(
+                snoozed.get(eid) and dt_util.parse_datetime(snoozed[eid])
+                and dt_util.utcnow() < dt_util.parse_datetime(snoozed[eid])
+                for eid in entity_ids
+            )
+            if all_snoozed:
+                continue
 
-            state = self.hass.states.get(entity_id)
-
-            if not state:
-                return True
-
-            if state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
-                return True
-
-            last_reported = state.last_reported or state.last_updated
-            entity_info = entities_data.get(entity_id) or {}
-            if not last_reported and "last_report_ts" in entity_info:
-                last_reported = dt_util.parse_datetime(entity_info["last_report_ts"])
-
-            if not last_reported:
-                if self.manager.is_learning():
-                    continue
-                return True
-
-            elapsed = (dt_util.utcnow() - last_reported).total_seconds()
-            timeout = self.manager.get_timeout_for_entity(entity_id)
-
-            if elapsed > timeout:
+            health = self.manager.evaluate_device_health(device_id)
+            if health["health_status"] == "dead":
                 return True
 
         return False
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        """Return lists of dead, alive, learning, snoozed, and warning entities."""
-        monitored = self.manager.get_monitored_entities()
-        entities_data = self.manager.learned_data.get("entities", {})
+        """Return lists of dead, alive, suspected, learning, and snoozed devices."""
+        devices = self.manager.get_monitored_devices()
+        snoozed_data = self.manager.learned_data.get("snoozed", {})
 
-        dead_entities = []
-        alive_entities = []
-        learning_entities = []
-        snoozed_entities = []
-        low_battery_entities = []
+        dead_devices = []
+        alive_devices = []
+        suspected_devices = []
+        learning_devices = []
+        snoozed_devices = []
+        low_battery_devices = []
 
-        for entity_id in monitored:
-            snooze_until_str = self.manager.learned_data.get("snoozed", {}).get(entity_id)
-            is_snoozed = False
-            if snooze_until_str:
-                snooze_until = dt_util.parse_datetime(snooze_until_str)
-                if snooze_until and dt_util.utcnow() < snooze_until:
-                    is_snoozed = True
+        for device_id, device_info in devices.items():
+            device_name = device_info.get("name", device_id)
+            entity_ids = device_info.get("entities", [])
 
-            state = self.hass.states.get(entity_id)
-            is_dead_raw = False
+            # Check snooze
+            all_snoozed = entity_ids and all(
+                snoozed_data.get(eid) and dt_util.parse_datetime(snoozed_data[eid])
+                and dt_util.utcnow() < dt_util.parse_datetime(snoozed_data[eid])
+                for eid in entity_ids
+            )
+            if all_snoozed:
+                snoozed_devices.append(device_name)
+                continue
 
-            if not state or state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
-                is_dead_raw = True
+            health = self.manager.evaluate_device_health(device_id)
+            status = health["health_status"]
+
+            if status == "dead":
+                dead_devices.append(device_name)
+            elif status == "suspected":
+                suspected_devices.append(device_name)
+            elif status == "learning":
+                learning_devices.append(device_name)
             else:
-                last_reported = state.last_reported or state.last_updated
-                entity_info = entities_data.get(entity_id) or {}
-                if not last_reported and "last_report_ts" in entity_info:
-                    last_reported = dt_util.parse_datetime(entity_info["last_report_ts"])
+                alive_devices.append(device_name)
 
-                if not last_reported:
-                    if self.manager.is_learning():
-                        learning_entities.append(entity_id)
-                        continue
-                    is_dead_raw = True
-                else:
-                    elapsed = (dt_util.utcnow() - last_reported).total_seconds()
-                    timeout = self.manager.get_timeout_for_entity(entity_id)
-                    if elapsed > timeout:
-                        is_dead_raw = True
-
-            # Resolve low-battery warnings (< 7 days depletion estimate)
-            depletion = self.manager.estimate_battery_depletion(entity_id)
+            # Check low battery
+            depletion = self.manager.estimate_battery_depletion(device_id)
             if depletion and depletion.get("depletion_days") is not None:
                 if depletion["depletion_days"] < 7.0:
-                    low_battery_entities.append(entity_id)
-
-            if is_snoozed:
-                snoozed_entities.append(entity_id)
-            elif is_dead_raw:
-                dead_entities.append(entity_id)
-            else:
-                alive_entities.append(entity_id)
+                    low_battery_devices.append(device_name)
 
         return {
-            "dead_entities": dead_entities,
-            "dead_count": len(dead_entities),
-            "alive_entities": alive_entities,
-            "alive_count": len(alive_entities),
-            "learning_entities": learning_entities,
-            "snoozed_entities": snoozed_entities,
-            "snoozed_count": len(snoozed_entities),
-            "low_battery_entities": low_battery_entities,
-            "low_battery_count": len(low_battery_entities),
-            "total_monitored": len(monitored),
+            "dead_devices": dead_devices,
+            "dead_count": len(dead_devices),
+            "alive_devices": alive_devices,
+            "alive_count": len(alive_devices),
+            "suspected_devices": suspected_devices,
+            "suspected_count": len(suspected_devices),
+            "learning_devices": learning_devices,
+            "learning_count": len(learning_devices),
+            "snoozed_devices": snoozed_devices,
+            "snoozed_count": len(snoozed_devices),
+            "low_battery_devices": low_battery_devices,
+            "low_battery_count": len(low_battery_devices),
+            "total_monitored": len(devices),
             "learning_active": self.manager.is_learning(),
         }

@@ -1,25 +1,25 @@
-"""The Is It Dead? integration."""
+"""The Is It Dead? integration — Device-centric health monitoring (v2)."""
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta
 import logging
 import os
 import shutil
+from datetime import timedelta
+from typing import Any
+
+import voluptuous as vol
 import yaml
 
-from typing import Any
-import voluptuous as vol
-
-
-import homeassistant.helpers.config_validation as cv
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import (
-    STATE_UNAVAILABLE,
-    STATE_UNKNOWN,
-)
+from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import (
+    area_registry as ar,
+    config_validation as cv,
+    device_registry as dr,
+    entity_registry as er,
+)
 from homeassistant.helpers.event import (
     async_track_state_change_event,
     async_track_time_interval,
@@ -37,6 +37,7 @@ from .const import (
     CONF_MIN_TIMEOUT,
     CONF_MONITORED_DOMAINS,
     CONF_MULTIPLIER,
+    CONF_STANDALONE_ENTITIES,
     CONF_UPDATE_INTERVAL,
     DEFAULT_BATTERY_ONLY,
     DEFAULT_LEARNING_PERIOD,
@@ -44,6 +45,7 @@ from .const import (
     DEFAULT_MIN_TIMEOUT,
     DEFAULT_MONITORED_DOMAINS,
     DEFAULT_MULTIPLIER,
+    DEFAULT_STANDALONE_ENTITIES,
     DEFAULT_UPDATE_INTERVAL,
     DOMAIN,
     PLATFORMS,
@@ -56,11 +58,12 @@ _LOGGER = logging.getLogger(__name__)
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Is It Dead? from a config entry."""
-    manager = IsItDeadManager(hass, entry)
-    await manager.async_initialize()
-
     hass.data.setdefault(DOMAIN, {})
+
+    manager = IsItDeadManager(hass, entry)
     hass.data[DOMAIN][entry.entry_id] = manager
+
+    await manager.async_initialize()
 
     # Forward setup to platforms (binary_sensor)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
@@ -113,19 +116,68 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     except Exception as err:
         _LOGGER.error("Failed to copy actionable blueprint: %s", err)
 
-    # Define custom service handlers
+    # ── Device-level service handlers ───────────────────────────────────
+    async def async_handle_exclude_device(call) -> None:
+        """Exclude a device from monitoring by adding all its entities to exclusion."""
+        device_id = call.data["device_id"]
+        for m in hass.data[DOMAIN].values():
+            device_entities = m.get_entities_for_device(device_id)
+            if device_entities:
+                excluded = list(m.excluded_entities)
+                for eid in device_entities:
+                    if eid not in excluded:
+                        excluded.append(eid)
+                hass.config_entries.async_update_entry(
+                    m.config_entry,
+                    options={**m.config_entry.options, CONF_EXCLUDED_ENTITIES: excluded},
+                )
+                break
+
+    async def async_handle_snooze_device(call) -> None:
+        """Snooze all entities for a device."""
+        device_id = call.data["device_id"]
+        hours = float(call.data.get("duration_hours", 24))
+        for m in hass.data[DOMAIN].values():
+            device_entities = m.get_entities_for_device(device_id)
+            if device_entities:
+                snoozed = m.learned_data.setdefault("snoozed", {})
+                if hours <= 0:
+                    for eid in device_entities:
+                        snoozed.pop(eid, None)
+                else:
+                    expire_time = dt_util.utcnow() + timedelta(hours=hours)
+                    for eid in device_entities:
+                        snoozed[eid] = expire_time.isoformat()
+                await m._store.async_save(m.learned_data)
+                m.notify_listeners(None)
+                break
+
+    async def async_handle_relearn_device(call) -> None:
+        """Reset learned data for all entities of a device."""
+        device_id = call.data["device_id"]
+        for m in hass.data[DOMAIN].values():
+            device_entities = m.get_entities_for_device(device_id)
+            if device_entities:
+                entities_data = m.learned_data.setdefault("entities", {})
+                for eid in device_entities:
+                    if eid in entities_data:
+                        entities_data[eid] = {"count": 0, "average_interval": 0.0}
+                await m._store.async_save(m.learned_data)
+                m.notify_listeners(None)
+                break
+
+    # Legacy entity-level services (kept for backward compatibility)
     async def async_handle_exclude(call) -> None:
         entity_id = call.data["entity_id"]
         for m in hass.data[DOMAIN].values():
-            if entity_id in m.get_monitored_entities():
-                excluded = list(m.excluded_entities)
-                if entity_id not in excluded:
-                    excluded.append(entity_id)
-                    hass.config_entries.async_update_entry(
-                        m.config_entry,
-                        options={**m.config_entry.options, CONF_EXCLUDED_ENTITIES: excluded}
-                    )
-                break
+            excluded = list(m.excluded_entities)
+            if entity_id not in excluded:
+                excluded.append(entity_id)
+                hass.config_entries.async_update_entry(
+                    m.config_entry,
+                    options={**m.config_entry.options, CONF_EXCLUDED_ENTITIES: excluded},
+                )
+            break
 
     async def async_handle_snooze(call) -> None:
         entity_id = call.data["entity_id"]
@@ -160,29 +212,43 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 custom_timeouts.pop(entity_id, None)
             else:
                 custom_timeouts[entity_id] = hours
-            
+
             yaml_str = yaml.dump(custom_timeouts)
             hass.config_entries.async_update_entry(
                 m.config_entry,
-                options={**m.config_entry.options, CONF_CUSTOM_TIMEOUTS: yaml_str}
+                options={**m.config_entry.options, CONF_CUSTOM_TIMEOUTS: yaml_str},
             )
             break
 
-    # Register services with validation schemas
-    if not hass.services.has_service(DOMAIN, "exclude_entity"):
+    # Register device-level services
+    device_schema = vol.Schema({vol.Required("device_id"): cv.string})
+    for svc_name, handler in (
+        ("exclude_device", async_handle_exclude_device),
+        ("relearn_device", async_handle_relearn_device),
+    ):
+        if not hass.services.has_service(DOMAIN, svc_name):
+            hass.services.async_register(DOMAIN, svc_name, handler, schema=device_schema)
+
+    if not hass.services.has_service(DOMAIN, "snooze_device"):
         hass.services.async_register(
             DOMAIN,
-            "exclude_entity",
-            async_handle_exclude,
+            "snooze_device",
+            async_handle_snooze_device,
             schema=vol.Schema({
-                vol.Required("entity_id"): cv.entity_id,
+                vol.Required("device_id"): cv.string,
+                vol.Optional("duration_hours", default=24.0): vol.Coerce(float),
             }),
+        )
+
+    # Register legacy entity-level services
+    if not hass.services.has_service(DOMAIN, "exclude_entity"):
+        hass.services.async_register(
+            DOMAIN, "exclude_entity", async_handle_exclude,
+            schema=vol.Schema({vol.Required("entity_id"): cv.entity_id}),
         )
     if not hass.services.has_service(DOMAIN, "snooze_entity"):
         hass.services.async_register(
-            DOMAIN,
-            "snooze_entity",
-            async_handle_snooze,
+            DOMAIN, "snooze_entity", async_handle_snooze,
             schema=vol.Schema({
                 vol.Required("entity_id"): cv.entity_id,
                 vol.Optional("duration_hours", default=24.0): vol.Coerce(float),
@@ -190,18 +256,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
     if not hass.services.has_service(DOMAIN, "relearn_entity"):
         hass.services.async_register(
-            DOMAIN,
-            "relearn_entity",
-            async_handle_relearn,
-            schema=vol.Schema({
-                vol.Required("entity_id"): cv.entity_id,
-            }),
+            DOMAIN, "relearn_entity", async_handle_relearn,
+            schema=vol.Schema({vol.Required("entity_id"): cv.entity_id}),
         )
     if not hass.services.has_service(DOMAIN, "set_manual_timeout"):
         hass.services.async_register(
-            DOMAIN,
-            "set_manual_timeout",
-            async_handle_set_manual_timeout,
+            DOMAIN, "set_manual_timeout", async_handle_set_manual_timeout,
             schema=vol.Schema({
                 vol.Required("entity_id"): cv.entity_id,
                 vol.Required("timeout_hours"): vol.Coerce(float),
@@ -232,7 +292,12 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
         # Unregister services if this is the last entry
         if not hass.data[DOMAIN]:
-            for service in ("exclude_entity", "snooze_entity", "relearn_entity", "set_manual_timeout"):
+            all_services = (
+                "exclude_entity", "snooze_entity", "relearn_entity",
+                "set_manual_timeout", "exclude_device", "snooze_device",
+                "relearn_device",
+            )
+            for service in all_services:
                 if hass.services.has_service(DOMAIN, service):
                     hass.services.async_remove(DOMAIN, service)
 
@@ -244,8 +309,12 @@ async def async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     await hass.config_entries.async_reload(entry.entry_id)
 
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  IsItDeadManager — Device-centric tracking engine (v2)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 class IsItDeadManager:
-    """Manages the state tracking, calculations, and learning logic."""
+    """Manages device-level state tracking, learning, and health assessment."""
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         """Initialize the manager."""
@@ -280,6 +349,10 @@ class IsItDeadManager:
             CONF_BATTERY_ONLY,
             entry.data.get(CONF_BATTERY_ONLY, DEFAULT_BATTERY_ONLY),
         )
+        self.standalone_entities = entry.options.get(
+            CONF_STANDALONE_ENTITIES,
+            entry.data.get(CONF_STANDALONE_ENTITIES, DEFAULT_STANDALONE_ENTITIES),
+        )
 
         # Parse custom overrides (Entity ID -> Hours)
         custom_raw = entry.options.get(CONF_CUSTOM_TIMEOUTS, "")
@@ -299,30 +372,49 @@ class IsItDeadManager:
         self.listeners: list[Any] = []
         self._unsub_state_change = None
         self._unsub_periodic = None
-        self.async_add_new_entities_callback = None
+        self.async_add_new_devices_callback = None
+
+        # Cache: device_id -> list of entity_ids
+        self._device_entity_map: dict[str, list[str]] = {}
+        # Cache: entity_id -> device_id (reverse lookup)
+        self._entity_to_device: dict[str, str] = {}
 
     async def async_initialize(self) -> None:
         """Load storage and start tracking listeners."""
-        # Load persisted data
-        self.learned_data = await self._store.async_load() or {}
+        # Load persisted data (handles v1 -> v2 migration)
+        stored = await self._store.async_load() or {}
+        if stored and "entities" in stored and "devices" not in stored:
+            # v1 data — migrate: keep entity-level data, initialize device structure
+            _LOGGER.info("Migrating v1 entity-level data to v2 device-centric format")
+            self.learned_data = stored
+            self.learned_data.setdefault("devices", {})
+        else:
+            self.learned_data = stored
 
         # Set or maintain learning phase start timestamp
         if "learning_start_time" not in self.learned_data:
             self.learned_data["learning_start_time"] = dt_util.utcnow().isoformat()
             await self._store.async_save(self.learned_data)
 
-        # Track active monitored entities
-        monitored_entities = self.get_monitored_entities()
-        if monitored_entities:
+        # Build device-entity mapping and start tracking
+        self._rebuild_device_map()
+
+        all_entity_ids = []
+        for entities in self._device_entity_map.values():
+            all_entity_ids.extend(entities)
+
+        if all_entity_ids:
             self._unsub_state_change = async_track_state_change_event(
-                self.hass, monitored_entities, self._async_handle_state_change
+                self.hass, all_entity_ids, self._async_handle_state_change
             )
 
-        # Populate initial battery history for already monitored entities
-        for entity_id in monitored_entities:
-            bat_id, bat_lvl = self.get_battery_info(entity_id)
-            if bat_id and bat_lvl is not None:
-                self.update_battery_history(entity_id, bat_id, bat_lvl)
+        # Populate initial battery history
+        for device_id, entity_ids in self._device_entity_map.items():
+            for entity_id in entity_ids:
+                bat_id, bat_lvl = self.get_battery_info_for_device(device_id)
+                if bat_id and bat_lvl is not None:
+                    self.update_battery_history(device_id, bat_id, bat_lvl)
+                    break  # One battery check per device is enough
 
         # Periodic check for timeouts
         self._unsub_periodic = async_track_time_interval(
@@ -337,8 +429,139 @@ class IsItDeadManager:
             self._unsub_state_change()
         if self._unsub_periodic:
             self._unsub_periodic()
-
         await self._store.async_save(self.learned_data)
+
+    # ── Device discovery ────────────────────────────────────────────────
+
+    def _rebuild_device_map(self) -> None:
+        """Build the device_id -> [entity_ids] mapping from registries."""
+        entity_reg = er.async_get(self.hass)
+        dev_reg = dr.async_get(self.hass)
+
+        self._device_entity_map = {}
+        self._entity_to_device = {}
+        standalone = []
+
+        for state in self.hass.states.async_all():
+            entity_id = state.entity_id
+            domain = entity_id.split(".")[0]
+
+            if domain not in self.monitored_domains:
+                continue
+
+            reg_entry = entity_reg.async_get(entity_id)
+            if reg_entry:
+                if reg_entry.disabled_by is not None:
+                    continue
+                if reg_entry.platform == DOMAIN:
+                    continue
+                if reg_entry.platform in self.excluded_integrations:
+                    continue
+
+            if entity_id in self.excluded_entities:
+                continue
+
+            # Determine device_id
+            device_id = None
+            if reg_entry and reg_entry.device_id:
+                device_id = reg_entry.device_id
+            else:
+                # Standalone entity (no device)
+                if self.standalone_entities == "ignore":
+                    continue
+                elif self.standalone_entities == "group":
+                    device_id = "__standalone__"
+                else:  # "track" — each gets its own virtual device
+                    device_id = f"__standalone_{entity_id}__"
+
+            # Battery-only filter: check at device level
+            if self.battery_only and device_id != "__standalone__" and not device_id.startswith("__standalone_"):
+                if not self._is_device_battery_powered(device_id, entity_reg):
+                    continue
+
+            self._device_entity_map.setdefault(device_id, [])
+            if entity_id not in self._device_entity_map[device_id]:
+                self._device_entity_map[device_id].append(entity_id)
+            self._entity_to_device[entity_id] = device_id
+
+    def _is_device_battery_powered(self, device_id: str, entity_reg: er.EntityRegistry) -> bool:
+        """Check if a device has any battery sensor among its entities."""
+        for entry in er.async_entries_for_device(entity_reg, device_id):
+            # Check registry-level device_class
+            if entry.original_device_class == "battery" or entry.device_class == "battery":
+                return True
+            # Check state-level device_class
+            sibling_state = self.hass.states.get(entry.entity_id)
+            if sibling_state:
+                dc = sibling_state.attributes.get("device_class")
+                if dc == "battery":
+                    return True
+                # Also check for battery attributes
+                for attr in ("battery", "battery_level", "battery_state"):
+                    if attr in sibling_state.attributes:
+                        return True
+        return False
+
+    def get_monitored_devices(self) -> dict[str, dict[str, Any]]:
+        """Get the current device_id -> device_info mapping."""
+        self._rebuild_device_map()
+
+        dev_reg = dr.async_get(self.hass)
+        entity_reg = er.async_get(self.hass)
+        area_reg = ar.async_get(self.hass)
+
+        result = {}
+        for device_id, entity_ids in self._device_entity_map.items():
+            if not entity_ids:
+                continue
+
+            device = dev_reg.async_get(device_id) if not device_id.startswith("__") else None
+
+            # Gather integrations providing entities for this device
+            integrations = set()
+            for eid in entity_ids:
+                reg = entity_reg.async_get(eid)
+                if reg:
+                    integrations.add(reg.platform)
+
+            # Resolve area name
+            area_name = None
+            if device and device.area_id:
+                area = area_reg.async_get(device.area_id)
+                if area:
+                    area_name = area.name
+
+            result[device_id] = {
+                "device_id": device_id,
+                "name": (device.name_by_user or device.name) if device else (
+                    "Unassigned Entities" if device_id == "__standalone__"
+                    else entity_ids[0] if entity_ids else "Unknown"
+                ),
+                "manufacturer": device.manufacturer if device else None,
+                "model": device.model if device else None,
+                "area_name": area_name,
+                "integrations": sorted(integrations),
+                "entities": entity_ids,
+            }
+
+        return result
+
+    def get_entities_for_device(self, device_id: str) -> list[str]:
+        """Get entity IDs belonging to a device."""
+        if not self._device_entity_map:
+            self._rebuild_device_map()
+        return self._device_entity_map.get(device_id, [])
+
+    def get_all_monitored_entity_ids(self) -> list[str]:
+        """Get flat list of all monitored entity IDs across all devices."""
+        if not self._device_entity_map:
+            self._rebuild_device_map()
+        result = []
+        for entities in self._device_entity_map.values():
+            result.extend(entities)
+        return result
+
+    # ── Learning & timeout logic ────────────────────────────────────────
 
     def is_learning(self) -> bool:
         """Check if the global learning phase is active."""
@@ -348,92 +571,42 @@ class IsItDeadManager:
         start_time = dt_util.parse_datetime(start_time_str)
         if not start_time:
             return True
-        return (dt_util.utcnow() - start_time) < timedelta(
-            days=self.learning_period
-        )
+        return (dt_util.utcnow() - start_time) < timedelta(days=self.learning_period)
 
-    def get_monitored_entities(self) -> list[str]:
-        """Get filtered list of all currently active monitored entities."""
-        monitored = []
-        entity_reg = er.async_get(self.hass)
+    def get_timeout_for_device(self, device_id: str) -> float:
+        """Get the timeout threshold (seconds) for a device.
 
-        for state in self.hass.states.async_all():
-            entity_id = state.entity_id
-            domain = entity_id.split(".")[0]
-
-            if domain not in self.monitored_domains:
-                continue
-
-            # Check if entity is managed by this integration (self-monitoring check)
-            reg_entry = entity_reg.async_get(entity_id)
-            if reg_entry:
-                if reg_entry.disabled_by is not None:
-                    continue
-                if reg_entry.platform == DOMAIN:
-                    continue
-                # Per-integration exclusion
-                if reg_entry.platform in self.excluded_integrations:
-                    continue
-
-            if entity_id in self.excluded_entities:
-                continue
-
-            # Battery-only filter: skip entities whose device has no battery sensor
-            if self.battery_only and not self._is_battery_powered(entity_id, entity_reg):
-                continue
-
-            monitored.append(entity_id)
-
-        return monitored
-
-    def _is_battery_powered(self, entity_id: str, entity_reg: er.EntityRegistry) -> bool:
-        """Check if the device owning this entity has a battery sensor."""
-        # 1. Check if the entity itself has battery-related attributes
-        state = self.hass.states.get(entity_id)
-        if state:
-            for attr in ("battery", "battery_level", "battery_state"):
-                if attr in state.attributes:
-                    return True
-
-        # 2. Check sibling entities on the same device for a battery sensor
-        reg_entry = entity_reg.async_get(entity_id)
-        if not reg_entry or not reg_entry.device_id:
-            return False
-
-        for entry in er.async_entries_for_device(entity_reg, reg_entry.device_id):
-            # Check registry-level device_class
-            if entry.original_device_class == "battery" or entry.device_class == "battery":
-                return True
-            # Check state-level device_class and entity ID pattern
-            sibling_state = self.hass.states.get(entry.entity_id)
-            if sibling_state:
-                dc = sibling_state.attributes.get("device_class")
-                if dc == "battery":
-                    return True
-
-        return False
-
-    def get_timeout_for_entity(self, entity_id: str) -> float:
-        """Get calculated or custom timeout threshold (in seconds) for an entity."""
-        # 1. Custom override
-        if entity_id in self.custom_timeouts:
-            return self.custom_timeouts[entity_id] * 3600.0
-
-        # 2. Learned average-based timeout
+        Uses the BEST (shortest) learned interval among all entities in the device.
+        """
         entities_data = self.learned_data.get("entities", {})
-        entity_info = entities_data.get(entity_id)
-        if entity_info and entity_info.get("count", 0) > 0:
-            avg = entity_info["average_interval"]
-            timeout = avg * self.multiplier
+        entity_ids = self.get_entities_for_device(device_id)
+
+        best_interval = None
+        for entity_id in entity_ids:
+            # Check custom override
+            if entity_id in self.custom_timeouts:
+                custom_sec = self.custom_timeouts[entity_id] * 3600.0
+                if best_interval is None or custom_sec < best_interval:
+                    best_interval = custom_sec
+                continue
+
+            entity_info = entities_data.get(entity_id)
+            if entity_info and entity_info.get("count", 0) > 0:
+                avg = entity_info["average_interval"]
+                if best_interval is None or avg < best_interval:
+                    best_interval = avg
+
+        if best_interval is not None:
+            timeout = best_interval * self.multiplier
             min_sec = self.min_timeout * 3600.0
             max_sec = self.max_timeout * 3600.0
             return max(min(timeout, max_sec), min_sec)
 
-        # 3. Fallback: use maximum timeout (learning or otherwise)
+        # Fallback: max timeout
         return self.max_timeout * 3600.0
 
     def update_learned_data(self, entity_id: str, interval: float, count: int = 1) -> None:
-        """Calculate and store running average update interval."""
+        """Calculate and store running average update interval for an entity."""
         entities_data = self.learned_data.setdefault("entities", {})
         entity_info = entities_data.setdefault(
             entity_id, {"count": 0, "average_interval": 0.0}
@@ -446,56 +619,149 @@ class IsItDeadManager:
             entity_info["average_interval"] = interval
             entity_info["count"] = count
         else:
-            new_count = min(current_count + count, 50)  # Cap update history weight at 50
+            new_count = min(current_count + count, 50)
             entity_info["average_interval"] = (
                 current_avg * (new_count - count) + interval * count
             ) / new_count
             entity_info["count"] = new_count
 
-    def get_battery_info(self, entity_id: str) -> tuple[str | None, float | None]:
-        """Get the battery entity ID and current battery level for a monitored entity."""
-        state = self.hass.states.get(entity_id)
-        if not state:
+    # ── Device health assessment ────────────────────────────────────────
+
+    def evaluate_device_health(self, device_id: str) -> dict[str, Any]:
+        """Evaluate the health status of a device and return detailed info.
+
+        Returns a dict with:
+            health_status: "alive" | "suspected" | "dead" | "learning"
+            last_activity: ISO datetime of most recent entity report
+            last_active_entity: entity_id that reported most recently
+            silent_entities: list of entity_ids that haven't reported within threshold
+            active_entities: list of entity_ids that reported recently
+            entity_details: list of dicts with per-entity info
+        """
+        entity_ids = self.get_entities_for_device(device_id)
+        if not entity_ids:
+            return {
+                "health_status": "dead",
+                "last_activity": None,
+                "last_active_entity": None,
+                "silent_entities": [],
+                "active_entities": [],
+                "entity_details": [],
+            }
+
+        now = dt_util.utcnow()
+        timeout = self.get_timeout_for_device(device_id)
+        entities_data = self.learned_data.get("entities", {})
+
+        last_activity = None
+        last_active_entity = None
+        silent_entities = []
+        active_entities = []
+        entity_details = []
+        has_any_data = False
+
+        for entity_id in entity_ids:
+            state = self.hass.states.get(entity_id)
+            entity_info = entities_data.get(entity_id, {})
+
+            # Determine last reported time
+            last_reported = None
+            if state:
+                last_reported = state.last_reported or state.last_updated
+            if not last_reported and "last_report_ts" in entity_info:
+                last_reported = dt_util.parse_datetime(entity_info["last_report_ts"])
+
+            detail = {
+                "entity_id": entity_id,
+                "last_reported": last_reported.isoformat() if last_reported else None,
+                "state": state.state if state else "unavailable",
+            }
+            entity_details.append(detail)
+
+            if last_reported:
+                has_any_data = True
+                elapsed = (now - last_reported).total_seconds()
+                if elapsed > timeout:
+                    silent_entities.append(entity_id)
+                else:
+                    active_entities.append(entity_id)
+
+                # Track most recent activity across all entities
+                if last_activity is None or last_reported > last_activity:
+                    last_activity = last_reported
+                    last_active_entity = entity_id
+            elif state and state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+                silent_entities.append(entity_id)
+            elif not state:
+                silent_entities.append(entity_id)
+            else:
+                # Entity exists but no timestamp — treat as unknown
+                if not self.is_learning():
+                    silent_entities.append(entity_id)
+
+        # Determine health status
+        if not has_any_data:
+            health = "learning" if self.is_learning() else "dead"
+        elif len(active_entities) > 0 and len(silent_entities) > 0:
+            health = "suspected"
+        elif len(active_entities) == 0:
+            health = "dead"
+        else:
+            health = "alive"
+
+        return {
+            "health_status": health,
+            "last_activity": last_activity.isoformat() if last_activity else None,
+            "last_active_entity": last_active_entity,
+            "silent_entities": silent_entities,
+            "active_entities": active_entities,
+            "entity_details": entity_details,
+        }
+
+    # ── Battery helpers ─────────────────────────────────────────────────
+
+    def get_battery_info_for_device(self, device_id: str) -> tuple[str | None, float | None]:
+        """Get battery entity ID and level for a device."""
+        if device_id.startswith("__"):
             return None, None
 
-        # 1. Check if the entity itself has a battery attribute
-        for attr in ("battery", "battery_level", "battery_state"):
-            if attr in state.attributes:
-                try:
-                    return entity_id, float(state.attributes[attr])
-                except (ValueError, TypeError):
-                    pass
-
-        # 2. Look up the device registry
         entity_reg = er.async_get(self.hass)
-        reg_entry = entity_reg.async_get(entity_id)
-        if not reg_entry or not reg_entry.device_id:
-            return None, None
-
-        device_id = reg_entry.device_id
-
-        # Find all entities for this device and locate the battery sensor
         for entry in er.async_entries_for_device(entity_reg, device_id):
             if entry.domain == "sensor":
                 sensor_state = self.hass.states.get(entry.entity_id)
                 if sensor_state:
-                    device_class = sensor_state.attributes.get("device_class")
+                    dc = sensor_state.attributes.get("device_class")
                     unit = sensor_state.attributes.get("unit_of_measurement")
-                    if device_class == "battery" or unit == "%" or "battery" in entry.entity_id:
+                    if dc == "battery" or (unit == "%" and "battery" in entry.entity_id):
                         try:
                             return entry.entity_id, float(sensor_state.state)
                         except (ValueError, TypeError):
                             pass
-
         return None, None
 
-    def update_battery_history(self, entity_id: str, battery_entity_id: str, current_level: float) -> None:
+    def resolve_battery_type(self, device_id: str) -> str:
+        """Resolve battery type from Battery Notes or a battery_type sensor."""
+        if device_id.startswith("__"):
+            return "Unknown"
+        entity_reg = er.async_get(self.hass)
+        for entry in er.async_entries_for_device(entity_reg, device_id):
+            if entry.domain == "sensor":
+                sensor_state = self.hass.states.get(entry.entity_id)
+                if sensor_state:
+                    bat_type = sensor_state.attributes.get("battery_type")
+                    if bat_type:
+                        return str(bat_type)
+                    if entry.entity_id.endswith("_battery_type"):
+                        return str(sensor_state.state)
+        return "Unknown"
+
+    def update_battery_history(self, device_id: str, battery_entity_id: str, current_level: float) -> None:
         """Track battery level changes to estimate depletion time."""
         if not battery_entity_id or current_level is None:
             return
 
         battery_tracking = self.learned_data.setdefault("battery_tracking", {})
-        battery_data = battery_tracking.setdefault(entity_id, {})
+        battery_data = battery_tracking.setdefault(device_id, {})
         history_list = battery_data.setdefault("history", [])
 
         now_iso = dt_util.utcnow().isoformat()
@@ -507,97 +773,66 @@ class IsItDeadManager:
             if last_entry["val"] != current_level:
                 history_list.append({"ts": now_iso, "val": current_level})
 
-        # Cap history records at last 5 changes
         if len(history_list) > 5:
             history_list.pop(0)
 
-    def estimate_battery_depletion(self, entity_id: str) -> dict[str, Any]:
-        """Estimate remaining battery life and depletion date."""
-        battery_tracking = self.learned_data.setdefault("battery_tracking", {})
-        battery_data = battery_tracking.setdefault(entity_id, {})
-        history_list = battery_data.setdefault("history", [])
+    def estimate_battery_depletion(self, device_id: str) -> dict[str, Any]:
+        """Estimate remaining battery life and depletion date for a device."""
+        battery_tracking = self.learned_data.get("battery_tracking", {})
+        battery_data = battery_tracking.get(device_id, {})
+        history_list = battery_data.get("history", [])
 
-        # Check for recharging in the history
+        # Check for recharging
         for idx in range(1, len(history_list)):
             if history_list[idx]["val"] > history_list[idx - 1]["val"]:
-                battery_data["history"] = history_list[idx:]
                 return {
-                    "depletion_time": None,
-                    "depletion_days": None,
+                    "depletion_time": None, "depletion_days": None,
                     "discharge_rate_per_day": None,
-                    "status": "Battery charged, recalculating..."
+                    "status": "Battery charged, recalculating...",
                 }
 
         if len(history_list) < 2:
             return {
-                "depletion_time": None,
-                "depletion_days": None,
+                "depletion_time": None, "depletion_days": None,
                 "discharge_rate_per_day": None,
-                "status": "Learning battery discharge..."
+                "status": "Learning battery discharge...",
             }
 
-        first = history_list[0]
-        last = history_list[-1]
-
+        first, last = history_list[0], history_list[-1]
         first_time = dt_util.parse_datetime(first["ts"])
         last_time = dt_util.parse_datetime(last["ts"])
-
         if not first_time or not last_time:
             return {"status": "Error parsing history"}
 
         time_diff = (last_time - first_time).total_seconds()
         val_diff = first["val"] - last["val"]
 
-        # Handle battery recharging: reset tracking if level increased
-        if val_diff < 0:
-            battery_data["history"] = [{"ts": last["ts"], "val": last["val"]}]
+        if val_diff <= 0 or time_diff == 0:
             return {
-                "depletion_time": None,
-                "depletion_days": None,
-                "discharge_rate_per_day": None,
-                "status": "Battery charged, recalculating..."
+                "depletion_time": None, "depletion_days": None,
+                "discharge_rate_per_day": 0.0, "status": "Battery stable",
             }
 
-        if val_diff == 0 or time_diff == 0:
-            return {
-                "depletion_time": None,
-                "depletion_days": None,
-                "discharge_rate_per_day": 0.0,
-                "status": "Battery stable"
-            }
-
-        rate_per_sec = val_diff / time_diff
-        rate_per_day = rate_per_sec * 86400.0
-
-        current_val = last["val"]
-
-        if rate_per_day <= 0:
-            return {
-                "depletion_time": None,
-                "depletion_days": None,
-                "discharge_rate_per_day": 0.0,
-                "status": "Battery stable"
-            }
-
-        days_remaining = current_val / rate_per_day
+        rate_per_day = (val_diff / time_diff) * 86400.0
+        days_remaining = last["val"] / rate_per_day
         depletion_dt = last_time + timedelta(days=days_remaining)
 
         return {
             "depletion_time": depletion_dt.isoformat(),
             "depletion_days": round(days_remaining, 1),
             "discharge_rate_per_day": round(rate_per_day, 3),
-            "status": f"Estimated remaining: {round(days_remaining, 1)} days"
+            "status": f"Estimated remaining: {round(days_remaining, 1)} days",
         }
+
+    # ── History backfill ────────────────────────────────────────────────
 
     async def async_backfill_history(self) -> None:
         """Backfill average intervals using recorder history (runs in background)."""
-        # Wait for the recorder database to be fully initialized
         try:
             from homeassistant.components.recorder import get_instance
             recorder = get_instance(self.hass)
             await recorder.async_db_ready
         except (ImportError, AttributeError):
-            # Fallback for older HA versions
             from homeassistant.components.recorder import DOMAIN as RECORDER_DOMAIN
             if RECORDER_DOMAIN in self.hass.data:
                 recorder = self.hass.data[RECORDER_DOMAIN]
@@ -610,7 +845,7 @@ class IsItDeadManager:
             _LOGGER.error("Error waiting for recorder: %s", err)
 
         _LOGGER.info("Starting background history backfill for 'Is It Dead?'")
-        entity_ids = self.get_monitored_entities()
+        entity_ids = self.get_all_monitored_entity_ids()
         if not entity_ids:
             _LOGGER.info("No entities found to backfill history")
             return
@@ -618,15 +853,10 @@ class IsItDeadManager:
         start_time = dt_util.utcnow() - timedelta(days=self.learning_period)
         end_time = dt_util.utcnow()
 
-        # Initialize proposed exclusions list for entities that haven't reported yet
         entities_data = self.learned_data.setdefault("entities", {})
         for entity_id in entity_ids:
-            entities_data.setdefault(
-                entity_id, {"count": 0, "average_interval": 0.0}
-            )
+            entities_data.setdefault(entity_id, {"count": 0, "average_interval": 0.0})
 
-        # Query database in small chunks of 15 entities to avoid database lockups
-        # Lazy import — the recorder history API location varies across HA versions
         try:
             from homeassistant.components.recorder.history import get_significant_states
         except ImportError:
@@ -638,17 +868,11 @@ class IsItDeadManager:
             chunk = entity_ids[i : i + chunk_size]
             try:
                 states_history = await self.hass.async_add_executor_job(
-                    get_significant_states,
-                    self.hass,
-                    start_time,
-                    end_time,
-                    chunk,
+                    get_significant_states, self.hass, start_time, end_time, chunk,
                 )
-
                 for entity_id, states in states_history.items():
                     if len(states) < 2:
                         continue
-
                     intervals = []
                     for j in range(1, len(states)):
                         t1 = states[j - 1].last_reported or states[j - 1].last_updated
@@ -657,48 +881,44 @@ class IsItDeadManager:
                             diff = (t2 - t1).total_seconds()
                             if diff > 1.0:
                                 intervals.append(diff)
-
                     if intervals:
                         avg_interval = sum(intervals) / len(intervals)
-                        self.update_learned_data(
-                            entity_id, avg_interval, len(intervals)
-                        )
-                        # Prepopulate last reported time
+                        self.update_learned_data(entity_id, avg_interval, len(intervals))
                         last_state = states[-1]
                         last_ts = last_state.last_reported or last_state.last_updated
                         if last_ts:
                             entities_data[entity_id]["last_report_ts"] = last_ts.isoformat()
-
             except Exception as err:
                 _LOGGER.error("History backfill failed for chunk %s: %s", chunk, err)
-
-            # Yield control back to the event loop
             await asyncio.sleep(0.1)
 
         await self._store.async_save(self.learned_data)
         _LOGGER.info("Finished history backfill successfully")
-
-        # Notify entities to recheck states now that averages are updated
         self.notify_listeners(None)
+
+    # ── Event handlers ──────────────────────────────────────────────────
 
     @callback
     def _async_handle_state_change(self, event) -> None:
-        """Handle real-time state change events."""
+        """Handle real-time state change events — update device-level data."""
         entity_id = event.data["entity_id"]
         new_state = event.data["new_state"]
 
         if not new_state:
             return
 
-        # Notify sensor immediately if state goes unavailable or unknown
+        # Find which device this entity belongs to
+        device_id = self._entity_to_device.get(entity_id)
+
         if new_state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
-            self.notify_listeners(entity_id)
+            self.notify_listeners(device_id)
             return
 
         new_ts = new_state.last_reported or new_state.last_updated
         if not new_ts:
             return
 
+        # Update entity-level learned data
         entities_data = self.learned_data.setdefault("entities", {})
         entity_info = entities_data.setdefault(
             entity_id, {"count": 0, "average_interval": 0.0}
@@ -713,26 +933,31 @@ class IsItDeadManager:
                     self.update_learned_data(entity_id, interval)
 
         entity_info["last_report_ts"] = new_ts.isoformat()
-        
-        # Capture battery updates if present in state attributes
-        bat_id, bat_lvl = self.get_battery_info(entity_id)
-        if bat_id and bat_lvl is not None:
-            self.update_battery_history(entity_id, bat_id, bat_lvl)
 
-        self.notify_listeners(entity_id)
+        # Update device-level battery tracking
+        if device_id and not device_id.startswith("__"):
+            bat_id, bat_lvl = self.get_battery_info_for_device(device_id)
+            if bat_id and bat_lvl is not None:
+                self.update_battery_history(device_id, bat_id, bat_lvl)
+
+        self.notify_listeners(device_id)
 
     async def _async_handle_periodic(self, _now_time) -> None:
-        """Run periodic check across all entities and save data."""
-        # Periodically check and update battery records for monitored entities
-        for entity_id in self.get_monitored_entities():
-            bat_id, bat_lvl = self.get_battery_info(entity_id)
-            if bat_id and bat_lvl is not None:
-                self.update_battery_history(entity_id, bat_id, bat_lvl)
+        """Run periodic check across all devices and save data."""
+        # Refresh device map to pick up new entities
+        self._rebuild_device_map()
 
-        # Periodically save learned data to disk
+        # Update battery for all devices
+        for device_id in self._device_entity_map:
+            if not device_id.startswith("__"):
+                bat_id, bat_lvl = self.get_battery_info_for_device(device_id)
+                if bat_id and bat_lvl is not None:
+                    self.update_battery_history(device_id, bat_id, bat_lvl)
+
         await self._store.async_save(self.learned_data)
-        # Notify all entities to check their dead status
         self.notify_listeners(None)
+
+    # ── Pub/sub for binary sensors ──────────────────────────────────────
 
     def subscribe(self, callback_func) -> Any:
         """Register a binary sensor callback for update notifications."""
@@ -744,7 +969,7 @@ class IsItDeadManager:
 
         return unsubscribe
 
-    def notify_listeners(self, entity_id: str | None) -> None:
+    def notify_listeners(self, device_id: str | None) -> None:
         """Notify registered sensors that a re-evaluation is needed."""
         for listener in self.listeners:
-            listener(entity_id)
+            listener(device_id)

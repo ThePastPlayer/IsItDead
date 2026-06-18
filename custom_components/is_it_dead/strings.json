@@ -7,6 +7,7 @@
         "data": {
           "monitored_domains": "Domains to monitor",
           "battery_only": "Monitor battery-powered devices only",
+          "standalone_entities": "Entities without a device",
           "learning_period": "Learning Period (Days)",
           "multiplier": "Threshold Multiplier (Average * Multiplier)",
           "min_timeout": "Minimum Timeout (Hours)",
@@ -28,6 +29,7 @@
         "data": {
           "monitored_domains": "Domains to monitor",
           "battery_only": "Monitor battery-powered devices only",
+          "standalone_entities": "Entities without a device",
           "excluded_integrations": "Integrations to exclude",
           "learning_period": "Learning Period (Days)",
           "multiplier": "Threshold Multiplier (Average * Multiplier)",

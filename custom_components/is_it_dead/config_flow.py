@@ -8,9 +8,14 @@ import yaml
 
 from homeassistant import config_entries
 from homeassistant.core import callback
-from homeassistant.data_entry_flow import FlowResult
 from homeassistant.helpers import selector
 from homeassistant.helpers.storage import Store
+
+# FlowResult was removed in modern HA — use ConfigFlowResult/OptionsFlowResult instead
+try:
+    from homeassistant.config_entries import ConfigFlowResult
+except ImportError:
+    from homeassistant.data_entry_flow import FlowResult as ConfigFlowResult
 
 from .const import (
     CONF_CUSTOM_TIMEOUTS,
@@ -42,7 +47,7 @@ class IsItDeadConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
+    ) -> ConfigFlowResult:
         """Handle the initial user setup step."""
         errors: dict[str, str] = {}
 
@@ -99,7 +104,7 @@ class IsItDeadOptionsFlowHandler(config_entries.OptionsFlow):
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
-    ) -> FlowResult:
+    ) -> ConfigFlowResult:
         """Handle the options flow step."""
         errors: dict[str, str] = {}
 

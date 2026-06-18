@@ -12,7 +12,6 @@ from typing import Any
 import voluptuous as vol
 
 from homeassistant.components.frontend import async_register_panel, async_remove_panel
-from homeassistant.components.recorder.history import get_significant_states
 import homeassistant.helpers.config_validation as cv
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
@@ -573,6 +572,13 @@ class IsItDeadManager:
             )
 
         # Query database in small chunks of 15 entities to avoid database lockups
+        # Lazy import — the recorder history API location varies across HA versions
+        try:
+            from homeassistant.components.recorder.history import get_significant_states
+        except ImportError:
+            _LOGGER.warning("Could not import get_significant_states — skipping backfill")
+            return
+
         chunk_size = 15
         for i in range(0, len(entity_ids), chunk_size):
             chunk = entity_ids[i : i + chunk_size]

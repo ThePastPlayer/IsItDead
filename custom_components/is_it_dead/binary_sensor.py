@@ -14,7 +14,6 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import (
     area_registry as ar,
     device_registry as dr,
-    entity_platform as ep,
     entity_registry as er,
     issue_registry as ir,
 )

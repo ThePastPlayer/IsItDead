@@ -77,14 +77,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Register the sidebar panel
     from homeassistant.components.frontend import async_register_panel
-    async_register_panel(
-        hass,
-        frontend_url_path="is_it_dead",
-        webcomponent_name="is-it-dead-panel",
-        sidebar_title="Is It Dead?",
-        sidebar_icon="mdi:battery-alert",
-        module_url="/is_it_dead_ui/is_it_dead_panel.js",
-    )
+    try:
+        async_register_panel(
+            hass,
+            frontend_url_path="is_it_dead",
+            webcomponent_name="is-it-dead-panel",
+            sidebar_title="Is It Dead?",
+            sidebar_icon="mdi:battery-alert",
+            module_url="/is_it_dead_ui/is_it_dead_panel.js",
+            require_admin=False,
+        )
+        _LOGGER.info("Registered 'Is It Dead?' sidebar panel")
+    except Exception as err:
+        _LOGGER.error("Failed to register sidebar panel: %s", err)
 
     # Copy blueprint to local blueprints directory (run blocking I/O in executor)
     blueprint_src = hass.config.path("custom_components/is_it_dead/blueprints/is_it_dead_alert.yaml")

@@ -6,7 +6,7 @@
   "integration_type": "hub",
   "iot_class": "local_polling",
   "version": "1.0.0",
-  "dependencies": ["frontend", "recorder"],
+  "dependencies": ["frontend", "http", "recorder"],
   "documentation": "https://github.com/ThePastPlayer/IsItDead",
   "issue_tracker": "https://github.com/ThePastPlayer/IsItDead/issues"
 }

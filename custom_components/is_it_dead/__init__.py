@@ -65,15 +65,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Forward setup to platforms (binary_sensor)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
-    # Register the frontend static directory (guard against re-registration on reload)
+    # Register the frontend static directory
+    frontend_path = hass.config.path("custom_components/is_it_dead/frontend")
     try:
-        hass.http.register_static_path(
-            url="/is_it_dead_ui",
-            path=hass.config.path("custom_components/is_it_dead/frontend"),
-            cache_headers=False,
+        # Modern HA (2024.7+): async_register_static_paths
+        from homeassistant.components.http import StaticPathConfig
+        await hass.http.async_register_static_paths(
+            [StaticPathConfig("/is_it_dead_ui", frontend_path, False)]
         )
-    except Exception:  # noqa: BLE001
-        pass  # Already registered from a previous load
+        _LOGGER.debug("Registered static path via async_register_static_paths")
+    except (ImportError, AttributeError):
+        # Fallback for older HA versions
+        try:
+            hass.http.register_static_path("/is_it_dead_ui", frontend_path, False)
+            _LOGGER.debug("Registered static path via register_static_path (legacy)")
+        except Exception:  # noqa: BLE001
+            _LOGGER.warning("Could not register static path for frontend panel")
 
     # Register the sidebar panel
     from homeassistant.components.frontend import async_register_panel

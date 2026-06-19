@@ -51,8 +51,14 @@ async def async_setup_entry(
     async_add_entities([alert_sensor])
 
     # Initial load of monitored devices
-    devices = manager.get_monitored_devices()
-    async_add_new_devices(list(devices.keys()))
+    try:
+        devices = manager.get_monitored_devices()
+        _LOGGER.info("Initial device scan found %d devices", len(devices))
+        async_add_new_devices(list(devices.keys()))
+    except Exception as err:
+        _LOGGER.error(
+            "Failed to load monitored devices during setup: %s", err, exc_info=True
+        )
 
 
 class IsItDeadDeviceSensor(BinarySensorEntity):
@@ -245,15 +251,22 @@ class IsItDeadAlert(BinarySensorEntity):
     def _async_on_manager_update(self, device_id: str | None) -> None:
         """Update aggregate state on any device change or check trigger."""
         # Dynamically discover new devices
-        if self.manager.async_add_new_devices_callback:
-            devices = self.manager.get_monitored_devices()
-            self.manager.async_add_new_devices_callback(list(devices.keys()))
+        try:
+            if self.manager.async_add_new_devices_callback:
+                devices = self.manager.get_monitored_devices()
+                self.manager.async_add_new_devices_callback(list(devices.keys()))
+        except Exception as err:
+            _LOGGER.debug("Error discovering new devices: %s", err)
         self.async_write_ha_state()
 
     @property
     def is_on(self) -> bool:
         """Return True if any monitored device is currently dead (and not snoozed)."""
-        devices = self.manager.get_monitored_devices()
+        try:
+            devices = self.manager.get_monitored_devices()
+        except Exception as err:
+            _LOGGER.debug("Error getting devices for is_on: %s", err)
+            return False
         snoozed = self.manager.learned_data.get("snoozed", {})
 
         for device_id, device_info in devices.items():
@@ -276,7 +289,11 @@ class IsItDeadAlert(BinarySensorEntity):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return lists of dead, alive, suspected, learning, and snoozed devices."""
-        devices = self.manager.get_monitored_devices()
+        try:
+            devices = self.manager.get_monitored_devices()
+        except Exception as err:
+            _LOGGER.debug("Error getting devices for attributes: %s", err)
+            return {"error": str(err), "total_monitored": 0}
         snoozed_data = self.manager.learned_data.get("snoozed", {})
 
         dead_devices = []

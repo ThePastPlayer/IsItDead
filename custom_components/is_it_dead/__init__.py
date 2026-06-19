@@ -58,15 +58,29 @@ _LOGGER = logging.getLogger(__name__)
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Is It Dead? from a config entry."""
+    _LOGGER.info("Setting up Is It Dead? v2 (device-centric)")
     hass.data.setdefault(DOMAIN, {})
 
-    manager = IsItDeadManager(hass, entry)
+    try:
+        manager = IsItDeadManager(hass, entry)
+    except Exception as err:
+        _LOGGER.error("Failed to create IsItDeadManager: %s", err, exc_info=True)
+        raise
+
     hass.data[DOMAIN][entry.entry_id] = manager
 
-    await manager.async_initialize()
+    try:
+        await manager.async_initialize()
+    except Exception as err:
+        _LOGGER.error("Failed to initialize manager: %s", err, exc_info=True)
+        raise
 
     # Forward setup to platforms (binary_sensor)
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    try:
+        await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    except Exception as err:
+        _LOGGER.error("Failed to set up binary_sensor platform: %s", err, exc_info=True)
+        raise
 
     # Register the frontend static directory
     frontend_path = hass.config.path("custom_components/is_it_dead/frontend")
@@ -556,35 +570,53 @@ class IsItDeadManager:
             if not entity_ids:
                 continue
 
-            device = dev_reg.async_get(device_id) if not device_id.startswith("__") else None
+            try:
+                device = dev_reg.async_get(device_id) if not device_id.startswith("__") else None
 
-            # Gather integrations providing entities for this device
-            integrations = set()
-            for eid in entity_ids:
-                reg = entity_reg.async_get(eid)
-                if reg:
-                    integrations.add(reg.platform)
+                # Gather integrations providing entities for this device
+                integrations = set()
+                for eid in entity_ids:
+                    reg = entity_reg.async_get(eid)
+                    if reg:
+                        integrations.add(reg.platform)
 
-            # Resolve area name
-            area_name = None
-            if device and device.area_id:
-                area = area_reg.async_get(device.area_id)
-                if area:
-                    area_name = area.name
+                # Resolve area name
+                area_name = None
+                if device:
+                    area_id = getattr(device, "area_id", None)
+                    if area_id:
+                        area = area_reg.async_get(area_id)
+                        if area:
+                            area_name = getattr(area, "name", None)
 
-            result[device_id] = {
-                "device_id": device_id,
-                "name": (device.name_by_user or device.name) if device else (
-                    "Unassigned Entities" if device_id == "__standalone__"
-                    else entity_ids[0] if entity_ids else "Unknown"
-                ),
-                "manufacturer": device.manufacturer if device else None,
-                "model": device.model if device else None,
-                "area_name": area_name,
-                "integrations": sorted(integrations),
-                "entities": entity_ids,
-            }
+                # Resolve device name safely
+                device_name = "Unknown"
+                if device:
+                    device_name = (
+                        getattr(device, "name_by_user", None)
+                        or getattr(device, "name", None)
+                        or "Unknown Device"
+                    )
+                elif device_id == "__standalone__":
+                    device_name = "Unassigned Entities"
+                elif entity_ids:
+                    device_name = entity_ids[0]
 
+                result[device_id] = {
+                    "device_id": device_id,
+                    "name": device_name,
+                    "manufacturer": getattr(device, "manufacturer", None) if device else None,
+                    "model": getattr(device, "model", None) if device else None,
+                    "area_name": area_name,
+                    "integrations": sorted(integrations),
+                    "entities": entity_ids,
+                }
+            except Exception as err:
+                _LOGGER.error(
+                    "Error building device info for %s: %s", device_id, err, exc_info=True
+                )
+
+        _LOGGER.info("get_monitored_devices returning %d devices", len(result))
         return result
 
     def get_entities_for_device(self, device_id: str) -> list[str]:

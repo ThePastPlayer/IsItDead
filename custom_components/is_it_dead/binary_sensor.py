@@ -101,7 +101,7 @@ class IsItDeadDeviceSensor(BinarySensorEntity):
         issue_id = f"device_dead_{self.tracked_device_id}"
         health = self._get_health()
 
-        if health["health_status"] == "dead":
+        if health["health_status"] == "dead" and not self.manager.is_snoozed(self.tracked_device_id):
             devices = self.manager.get_monitored_devices()
             device_info = devices.get(self.tracked_device_id, {})
             device_name = device_info.get("name", self.tracked_device_id)
@@ -150,7 +150,7 @@ class IsItDeadDeviceSensor(BinarySensorEntity):
             return False
 
         health = self._get_health()
-        return health["health_status"] == "dead"
+        return health["health_status"] == "dead" or self.manager.battery_warning(self.tracked_device_id) or self.manager.network_warning(self.tracked_device_id)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -166,10 +166,7 @@ class IsItDeadDeviceSensor(BinarySensorEntity):
         depletion = self.manager.estimate_battery_depletion(self.tracked_device_id)
         battery_type = self.manager.resolve_battery_type(self.tracked_device_id)
 
-        low_battery_warning = False
-        if depletion and depletion.get("depletion_days") is not None:
-            if depletion["depletion_days"] < 7.0:
-                low_battery_warning = True
+        low_battery_warning = self.manager.battery_warning(self.tracked_device_id)
 
         # Timeout info
         timeout = self.manager.get_timeout_for_device(self.tracked_device_id)
@@ -209,6 +206,11 @@ class IsItDeadDeviceSensor(BinarySensorEntity):
             "entities": device_info.get("entities", []),
             # Health status
             "health_status": health["health_status"],
+            "health_reason": health.get("reason"),
+            "zigbee_evidence": self.manager.zigbee.snapshot(self.tracked_device_id),
+            "confidence": health.get("confidence"),
+            "network_readings": self.manager.network_info(self.tracked_device_id),
+            "weak_signal_warning": self.manager.network_warning(self.tracked_device_id),
             "last_activity": health.get("last_activity"),
             "last_active_entity": health.get("last_active_entity"),
             "silent_entities": health.get("silent_entities", []),
@@ -225,7 +227,7 @@ class IsItDeadDeviceSensor(BinarySensorEntity):
             "battery_depletion_estimate": depletion,
             "low_battery_warning": low_battery_warning,
             # Status flags
-            "learning_active": self.manager.is_learning(),
+            "learning_active": health["health_status"] == "learning",
             "snooze_until": snooze_until,
             "is_dead_raw": health["health_status"] == "dead",
         }
@@ -281,7 +283,7 @@ class IsItDeadAlert(BinarySensorEntity):
                 continue
 
             health = self.manager.evaluate_device_health(device_id)
-            if health["health_status"] == "dead":
+            if health["health_status"] == "dead" or self.manager.battery_warning(device_id) or self.manager.network_warning(device_id):
                 return True
 
         return False
@@ -302,6 +304,9 @@ class IsItDeadAlert(BinarySensorEntity):
         learning_devices = []
         snoozed_devices = []
         low_battery_devices = []
+        weak_signal_devices = []
+        alert_device_ids = []
+        dead_device_ids = []
 
         for device_id, device_info in devices.items():
             device_name = device_info.get("name", device_id)
@@ -322,6 +327,7 @@ class IsItDeadAlert(BinarySensorEntity):
 
             if status == "dead":
                 dead_devices.append(device_name)
+                dead_device_ids.append(device_id)
             elif status == "suspected":
                 suspected_devices.append(device_name)
             elif status == "learning":
@@ -329,14 +335,21 @@ class IsItDeadAlert(BinarySensorEntity):
             else:
                 alive_devices.append(device_name)
 
-            # Check low battery
-            depletion = self.manager.estimate_battery_depletion(device_id)
-            if depletion and depletion.get("depletion_days") is not None:
-                if depletion["depletion_days"] < 7.0:
-                    low_battery_devices.append(device_name)
+            battery_low = self.manager.battery_warning(device_id)
+            weak_signal = self.manager.network_warning(device_id)
+            if battery_low:
+                low_battery_devices.append(device_name)
+            if weak_signal:
+                weak_signal_devices.append(device_name)
+            if status == "dead" or battery_low or weak_signal:
+                alert_device_ids.append(device_id)
 
         return {
             "dead_devices": dead_devices,
+            "dead_device_ids": dead_device_ids,
+            "alert_device_ids": sorted(alert_device_ids),
+            "weak_signal_devices": weak_signal_devices,
+            "weak_signal_count": len(weak_signal_devices),
             "dead_count": len(dead_devices),
             "alive_devices": alive_devices,
             "alive_count": len(alive_devices),

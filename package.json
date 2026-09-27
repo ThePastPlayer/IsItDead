@@ -1,0 +1,9 @@
+{
+  "private": true,
+  "scripts": {
+    "test": "node --test tests/frontend.test.cjs"
+  },
+  "devDependencies": {
+    "linkedom": "^0.18.12"
+  }
+}

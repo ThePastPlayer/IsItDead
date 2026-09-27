@@ -1,6 +1,6 @@
 blueprint:
   name: Is It Dead? Actionable Alerts
-  description: Send actionable notifications to your mobile device when sensors go silent. Includes buttons to Snooze warnings for 24 hours or Exclude the silent entities entirely.
+  description: Send actionable notifications to your mobile device when sensors go silent. Includes a reversible 24-hour snooze. Reports low batteries and persistent weak signals too.
   domain: automation
   input:
     alert_sensor:
@@ -20,29 +20,22 @@ blueprint:
     title:
       name: Notification Title
       description: Title of the mobile alert.
-      default: "Dead Sensors Detected! 💀"
+      default: "Capteurs à vérifier"
     message:
       name: Notification Message
       description: Message body (supports template parsing).
-      default: "The following sensors have stopped reporting: {{ state_attr(alert_sensor, 'dead_entities') | join(', ') }}"
+      default: "Hors ligne probables : {{ state_attr(alert_sensor, 'dead_devices') or [] }}. Piles faibles : {{ state_attr(alert_sensor, 'low_battery_devices') or [] }}. Signal faible : {{ state_attr(alert_sensor, 'weak_signal_devices') or [] }}."
 
 mode: single
 
 trigger:
   - platform: state
     entity_id: !input alert_sensor
-    to: "on"
+    attribute: alert_device_ids
     id: alert_triggered
   - platform: event
     event_type: mobile_app_notification_action
-    event_data:
-      action: IS_IT_DEAD_SNOOZE_ALL
     id: snooze_clicked
-  - platform: event
-    event_type: mobile_app_notification_action
-    event_data:
-      action: IS_IT_DEAD_EXCLUDE_ALL
-    id: exclude_clicked
 
 action:
   - variables:
@@ -52,40 +45,31 @@ action:
       - conditions:
           - condition: trigger
             id: alert_triggered
+          - condition: template
+            value_template: "{{ (state_attr(alert_sensor, 'alert_device_ids') or []) | count > 0 }}"
         sequence:
-          - variables:
-              notify_service: "notify.mobile_app_{{ device_attr(notify_device, 'name') | slugify }}"
-              dead_list: "{{ state_attr(alert_sensor, 'dead_entities') }}"
-          - service: "{{ notify_service }}"
+          - device_id: !input notify_device
+            domain: mobile_app
+            type: notify
+            title: !input title
+            message: !input message
             data:
-              title: !input title
-              message: !input message
-              data:
-                actions:
-                  - action: IS_IT_DEAD_SNOOZE_ALL
-                    title: "Snooze 24h"
-                  - action: IS_IT_DEAD_EXCLUDE_ALL
-                    title: "Exclude Silent"
+              url: /is_it_dead
+              tag: "{{ this.entity_id }}"
+              actions:
+                - action: "{{ 'IS_IT_DEAD_SNOOZE_' ~ this.entity_id }}"
+                  title: "Snooze 24h"
 
       - conditions:
           - condition: trigger
             id: snooze_clicked
+          - condition: template
+            value_template: "{{ trigger.event.data.action == 'IS_IT_DEAD_SNOOZE_' ~ this.entity_id }}"
         sequence:
           - repeat:
-              for_each: "{{ state_attr(alert_sensor, 'dead_entities') or [] }}"
+              for_each: "{{ state_attr(alert_sensor, 'alert_device_ids') or [] }}"
               sequence:
-                - service: is_it_dead.snooze_entity
+                - service: is_it_dead.snooze_device
                   data:
-                    entity_id: "{{ repeat.item }}"
+                    device_id: "{{ repeat.item }}"
                     duration_hours: 24
-
-      - conditions:
-          - condition: trigger
-            id: exclude_clicked
-        sequence:
-          - repeat:
-              for_each: "{{ state_attr(alert_sensor, 'dead_entities') or [] }}"
-              sequence:
-                - service: is_it_dead.exclude_entity
-                  data:
-                    entity_id: "{{ repeat.item }}"

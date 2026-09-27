@@ -18,14 +18,15 @@
     },
     "error": {
       "invalid_yaml": "The Custom Timeouts YAML is invalid.",
-      "invalid_domains": "Please select at least one domain to monitor."
+      "invalid_domains": "Please select at least one domain to monitor.",
+      "invalid_timeout_range": "Minimum timeout must not exceed maximum timeout."
     }
   },
   "options": {
     "step": {
       "init": {
         "title": "Configure Is It Dead?",
-        "description": "Adjust learning rules, update thresholds, and exclude specific entities from surveillance. Proposed exclusions (entities that have never reported) will be pre-populated.",
+        "description": "Adjust monitoring settings. Exclusions are always explicit; silent sensors are not automatically excluded.",
         "data": {
           "monitored_domains": "Domains to monitor",
           "battery_only": "Monitor battery-powered devices only",
@@ -43,12 +44,13 @@
     },
     "error": {
       "invalid_yaml": "The Custom Timeouts YAML is invalid.",
-      "invalid_domains": "Please select at least one domain to monitor."
+      "invalid_domains": "Please select at least one domain to monitor.",
+      "invalid_timeout_range": "Minimum timeout must not exceed maximum timeout."
     }
   },
   "issues": {
     "sensor_dead": {
-      "title": "{name} is dead (No report)",
+      "title": "{name}: persistent loss of reports",
       "description": "The sensor `{entity_id}` ({name}) has stopped reporting. It may be out of range or its battery has depleted.\n\nRequired battery: **{battery_type}**.\n\nPlease replace the battery or restore range connection."
     }
   }

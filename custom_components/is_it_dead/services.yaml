@@ -68,3 +68,12 @@ set_manual_timeout:
           max: 720
           step: 0.5
           unit_of_measurement: hours
+
+check_device:
+  name: Check Zigbee device
+  description: Bounded read-only radio diagnostic. No response is inconclusive for sleeping devices. Five-minute cooldown.
+  fields:
+    device_id:
+      required: true
+      selector:
+        device:

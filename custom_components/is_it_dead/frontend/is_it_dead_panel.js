@@ -25,7 +25,7 @@ class IsItDeadPanel extends HTMLElement {
     const devices = Object.keys(this._hass.states)
       .filter(key => key.startsWith("binary_sensor."))
       .map(key => this._hass.states[key])
-      .filter(state => state && state.attributes && state.attributes.device_name);
+      .filter(state => state && state.attributes && state.attributes.device_name && state.attributes.tracked_device_id);
 
     // Sort: Dead first, Suspected second, then alphabetical by device_name
     const statusOrder = { dead: 0, suspected: 1, learning: 2, alive: 3 };
@@ -34,6 +34,9 @@ class IsItDeadPanel extends HTMLElement {
       const bStatus = (b.attributes.health_status || "alive").toLowerCase();
       const aOrder = statusOrder[aStatus] !== undefined ? statusOrder[aStatus] : 3;
       const bOrder = statusOrder[bStatus] !== undefined ? statusOrder[bStatus] : 3;
+      const aWarning = a.attributes.low_battery_warning || a.attributes.weak_signal_warning;
+      const bWarning = b.attributes.low_battery_warning || b.attributes.weak_signal_warning;
+      if (!!aWarning !== !!bWarning) return aWarning ? -1 : 1;
       if (aOrder !== bOrder) return aOrder - bOrder;
       const aName = a.attributes.device_name || a.entity_id;
       const bName = b.attributes.device_name || b.entity_id;
@@ -699,10 +702,11 @@ class IsItDeadPanel extends HTMLElement {
             </div>
             <div class="filter-group">
               <button class="filter-chip active" data-filter="all">All</button>
-              <button class="filter-chip" data-filter="dead">Dead</button>
-              <button class="filter-chip" data-filter="suspected">Suspected</button>
+              <button class="filter-chip" data-filter="attention">À vérifier</button>
+              <button class="filter-chip" data-filter="dead">Hors ligne probable</button>
+              <button class="filter-chip" data-filter="suspected">À confirmer</button>
               <button class="filter-chip" data-filter="alive">Healthy</button>
-              <button class="filter-chip" data-filter="learning">Learning</button>
+              <button class="filter-chip" data-filter="learning">Données insuffisantes</button>
             </div>
           </div>
 
@@ -772,6 +776,8 @@ class IsItDeadPanel extends HTMLElement {
             if (confirm("Are you sure you want to exclude this device from monitoring?")) {
               this._hass.callService("is_it_dead", "exclude_device", { device_id: trackedDeviceId });
             }
+          } else if (action === "check") {
+            this._hass.callService("is_it_dead", "check_device", { device_id: trackedDeviceId });
           } else if (action === "relearn") {
             if (confirm("Reset check-in history and restart learning for this device?")) {
               this._hass.callService("is_it_dead", "relearn_device", { device_id: trackedDeviceId });
@@ -817,7 +823,8 @@ class IsItDeadPanel extends HTMLElement {
     const filtered = devices.filter(device => {
       const status = (device.attributes.health_status || "alive").toLowerCase();
 
-      if (this._filter !== "all" && status !== this._filter) return false;
+      const attention = status === "dead" || status === "suspected" || device.attributes.low_battery_warning || device.attributes.weak_signal_warning;
+      if (this._filter === "attention" ? !attention : this._filter !== "all" && status !== this._filter) return false;
 
       // Search
       if (this._searchQuery) {
@@ -864,7 +871,7 @@ class IsItDeadPanel extends HTMLElement {
       const cardsHTML = devicesInArea.map(device => this._renderDeviceCard(device)).join("");
 
       html += `
-        <div class="area-section">
+        <div class="area-section" data-render-key="area:${this._escapeHtml(area)}">
           <div class="area-title-bar">
             <ha-icon icon="mdi:map-marker-outline" style="color: var(--primary-color, #03a9f4); --mdc-icon-size: 20px;"></ha-icon>
             <h2>${this._escapeHtml(area)}</h2>
@@ -877,20 +884,30 @@ class IsItDeadPanel extends HTMLElement {
       `;
     });
 
-    container.innerHTML = html;
+    const template = document.createElement("template");
+    template.innerHTML = html;
+    this._patchChildren(container, template.content);
+  }
 
-    // After render, set max-height for expanded entities
-    this._expandedDevices.forEach(deviceEntityId => {
-      const wrapper = container.querySelector(`.entity-details-wrapper[data-device-entity="${deviceEntityId}"]`);
-      if (wrapper) {
-        wrapper.style.maxHeight = wrapper.scrollHeight + "px";
-        wrapper.classList.add("open");
-      }
-      const toggle = container.querySelector(`.expand-toggle[data-device-entity="${deviceEntityId}"]`);
-      if (toggle) {
-        toggle.classList.add("expanded");
-      }
+  _patchChildren(parent, incoming) {
+    const previous = Array.from(parent.childNodes);
+    const used = new Set();
+    const key = node => node.nodeType === 1 ? node.getAttribute("data-render-key") : null;
+    Array.from(incoming.childNodes).forEach((fresh, index) => {
+      const freshKey = key(fresh);
+      let old = freshKey ? previous.find(node => !used.has(node) && key(node) === freshKey) : previous[index];
+      if (!old || used.has(old) || key(old) !== freshKey || old.nodeType !== fresh.nodeType || old.nodeName !== fresh.nodeName) {
+        old = fresh.cloneNode(true);
+      } else if (old.nodeType === 1) {
+        for (const attr of Array.from(old.attributes)) if (!fresh.hasAttribute(attr.name)) old.removeAttribute(attr.name);
+        for (const attr of Array.from(fresh.attributes)) if (old.getAttribute(attr.name) !== attr.value) old.setAttribute(attr.name, attr.value);
+        this._patchChildren(old, fresh);
+      } else if (old.nodeValue !== fresh.nodeValue) old.nodeValue = fresh.nodeValue;
+      used.add(old);
+      const position = parent.childNodes[index] || null;
+      if (old !== position) parent.insertBefore(old, position);
     });
+    for (const old of previous) if (!used.has(old)) old.remove();
   }
 
   _renderDeviceCard(device) {
@@ -917,7 +934,7 @@ class IsItDeadPanel extends HTMLElement {
     const isExpanded = this._expandedDevices.has(device.entity_id);
 
     // Status label
-    const statusLabels = { dead: "Dead", suspected: "Suspected", alive: "Healthy", learning: "Learning" };
+    const statusLabels = { dead: "Hors ligne probable", suspected: "À confirmer", alive: "Activité récente", learning: "Données insuffisantes" };
     const statusLabel = statusLabels[status] || "Unknown";
 
     // Integration pills
@@ -1021,7 +1038,7 @@ class IsItDeadPanel extends HTMLElement {
     const expandLabel = isExpanded ? "Hide entities" : `Show ${entityCount} entities`;
 
     return `
-      <div class="device-card status-${status}">
+      <div class="device-card status-${status}" data-render-key="${this._escapeHtml(device.entity_id)}">
         <div class="card-header" data-device-entity="${device.entity_id}">
           <div class="card-title-block">
             <h2 class="card-device-name" title="${this._escapeHtml(deviceName)}">${this._escapeHtml(deviceName)}</h2>
@@ -1032,6 +1049,10 @@ class IsItDeadPanel extends HTMLElement {
 
         <div class="card-body">
           ${warningHTML}
+          <div class="detail-row">${this._escapeHtml(({recent_zigbee_report: "Paquet radio Zigbee reçu", zigbee_bridge_offline: "Passerelle Zigbee hors ligne : état des capteurs incertain", startup_grace: "Délai de grâce au démarrage", unavailable: "Entités physiques indisponibles de façon persistante", heartbeat_overdue: "Rapports attendus absents ; vérifier pile, réseau et intégration", recent_integration_report: "Rapport récent de l’intégration (ne prouve pas un paquet radio)", insufficient_heartbeat_evidence: "Pas assez de preuves pour conclure à une panne", not_monitored: "Appareil exclu ou retiré"})[attrs.health_reason] || "")}</div>
+          ${attrs.weak_signal_warning ? '<div class="warning-banner">Signal faible persistant : vérifier la couverture, sans conclure à une panne.</div>' : ''}
+          ${(attrs.network_readings || []).map(r => `<div class="detail-row">${this._escapeHtml(r.kind)} : ${this._escapeHtml(String(r.value))} ${this._escapeHtml(r.unit || '')}${r.fresh ? '' : ' (mesure ancienne)'}</div>`).join('')}
+
 
           ${intPillsHTML ? `<div class="integrations-row">${intPillsHTML}</div>` : ""}
 
@@ -1053,6 +1074,7 @@ class IsItDeadPanel extends HTMLElement {
             </span>` : ""}
           </div>
 
+          ${attrs.zigbee_evidence?.backend ? `<div class="detail-row">Source : ${this._escapeHtml(attrs.zigbee_evidence.backend)} · Diagnostic : ${this._escapeHtml(attrs.zigbee_evidence.last_probe?.status || "non demandé")}</div>` : ""}
           ${snoozeHTML}
         </div>
 
@@ -1062,7 +1084,7 @@ class IsItDeadPanel extends HTMLElement {
           <span class="chevron">▼</span>
         </div>
 
-        <div class="entity-details-wrapper${isExpanded ? " open" : ""}" data-device-entity="${device.entity_id}" style="${isExpanded ? "" : "max-height: 0;"}">
+        <div class="entity-details-wrapper${isExpanded ? " open" : ""}" data-device-entity="${device.entity_id}" style="max-height: ${isExpanded ? "none" : "0"};">
           <div class="entity-details">
             <div class="entity-details-title">Entity Breakdown</div>
             ${entityRowsHTML}

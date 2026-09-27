@@ -1,91 +1,93 @@
-# ⚡ Is It Dead? (is_it_dead)
+# Is It Dead? — device health monitoring
 
-[![HACS Custom Badge](https://img.shields.io/badge/HACS-Custom-orange.svg?style=for-the-badge)](https://github.com/hacs/integration)
-[![Open your Home Assistant instance and open a repository in HACS.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=ThePastPlayer&repository=IsItDead&category=integration)
+Home Assistant / HACS integration for battery sensors and other physical devices.
+Version 1.2.0 separates **persistent unavailability**, **low battery**, **weak
+signal**, and **insufficient evidence**. It cannot prove that a device is physically
+broken or distinguish an empty battery from a failed radio/gateway.
 
-**Is It Dead?** is a HACS-compatible Home Assistant custom integration designed to monitor rechargeable battery-powered Zigbee end devices and other sensors for sudden range/battery silences. 
 
-Rather than relying on static, arbitrary timeout rules (which fail for devices with highly variable reporting rates), this integration **learns the check-in heartbeats** of each sensor to compute a **dynamic, mathematically optimized timeout threshold**.
 
----
+## Installation
 
-## 🚀 Key Features
+Add `https://github.com/ThePastPlayer/IsItDead` as a custom HACS integration
+repository, download, restart Home Assistant, then add **Is It Dead?** under
+Settings → Devices & services. The sidebar panel groups devices by room.
+For manual installation, copy `custom_components/is_it_dead` into your configuration.
 
-*   **Surveillance-by-Default**: Automatically monitors all sensors in your configured domains. No manual setup required—devices are actively tracked unless explicitly excluded.
-*   **Heartbeat-Based Learning**: Learns reporting intervals (averages computed over up to 50 data points) and adapts dynamically. Backfills averages instantly from your recorder database at boot.
-*   **Proposed Exclusions**: Detects and flags entities that have never sent a state change, allowing you to exclude them with a single click during setup or configuration.
-*   **Native HA Repairs**: Automatically generates a Home Assistant Repair issue when a sensor dies, telling you exactly which battery type (e.g. *CR2032*, *2x AAA*) is required for replacement. The issue clears itself automatically as soon as the sensor checks back in.
-*   **Dashboard Card Grouping by Area**: A dedicated, premium sidebar dashboard panel groups your monitored sensors by their physical Home Assistant Areas, displaying battery levels, relative elapsed time, check-in intervals, and depletion predictions.
-*   **Quick Control Actions**: Inline controls on each dashboard card let you **Snooze** alerts, **Exclude** entities, trigger **Re-learning**, or override timeouts **manually**.
-*   **Battery Notes Synergy**: Auto-resolves associated `_battery_type` sensors to expose required battery shapes on dashboard cards and inside Repair issues.
-*   **Pre-emptive Warnings**: Triggers early warnings when remaining battery life is predicted to drop under 7 days, showing warning indicators *before* the sensor goes offline.
-*   **Actionable Notification Blueprints**: Includes a prepackaged blueprint offering push notifications to your mobile app with inline action buttons to Snooze or Exclude the silent sensor.
+## Detection
 
----
+- Device discovery includes registered entities whose state is temporarily missing.
+  Newly discovered devices are subscribed on the next periodic scan (15 minutes by default).
+- Both unchanged state reports and changed values are observed. Explicit `last_seen`
+  has priority. Restored, unavailable and unknown states are not fresh evidence.
+- Five-minute startup grace; anomalies must persist for at least one monitoring
+  interval before becoming a probable offline alert.
+- Automatic silence thresholds need at least eight intervals and the configured
+  learning period (seven days by default). The upper reporting-interval percentile
+  is multiplied by the configured margin. Known slow reports are not clipped below
+  their observed cadence. Manual per-entity timeouts are exact, in hours.
+- Motion/contact binary sensors do not acquire silence deadlines from inactivity
+  unless an explicit last_seen or manual deadline is available.
+- Battery warnings: at or below 20 percent, or a native battery-low binary sensor.
+  Voltage is not percentage. Battery Notes supplies the replacement battery type.
+- Weak signal: sustained RSSI ≤ -85 dBm or linkquality ≤ 40/255. These are
+  indicative thresholds, not proof of a disconnection. A new weak report is required
+  between checks; readings older than 24 hours cannot raise a signal warning.
+- No speculative battery lifetime countdown; no recorder change-history backfill
+  presented as physical heartbeat history; no automatically selected exclusions.
 
-## 📥 One-Click Installation
+`last_reported` proves an integration wrote a value, **not necessarily receipt of
+an actual device packet**. Integrations that continually republish a cache need a
+real last_seen/availability signal for reliable offline detection. Unknown coverage
+is displayed rather than silently labelled healthy. Initial heartbeat learning
+restarts when migrating from the old unreliable averages; exclusions and snoozes remain.
 
-Click the button below to automatically add this repository to HACS and open the setup panel:
+## Reports and controls
 
-[![Open your Home Assistant instance and open a repository in HACS.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=ThePastPlayer&repository=IsItDead&category=integration)
+The **À vérifier** panel filter collects probable offline devices, anomalies awaiting
+confirmation, low batteries and weak signals. Each card explains the evidence.
+`binary_sensor.is_it_dead_alert` is on for confirmed offline, low battery or persistent
+weak signal (unless snoozed). Its attributes include `dead_devices`, `dead_device_ids`,
+`low_battery_devices`, `weak_signal_devices` and stable `alert_device_ids`.
 
----
+The installed automation blueprint targets an actual mobile-app device and reacts
+when the affected device list changes, even if the aggregate remains on. Its push
+opens `/is_it_dead` and offers a reversible 24-hour snooze. Create a blueprint
+notification automation to enable pushes; installing the integration alone does not
+send them. Existing dashboard service controls remain available:
 
-## 🛠️ Manual Installation & Setup
+- `snooze_device`, `exclude_device`, `relearn_device`: `device_id`.
+- Legacy `snooze_entity`, `exclude_entity`, `relearn_entity`: `entity_id`.
+- `set_manual_timeout`: `entity_id`, `timeout_hours` (0 removes the override).
 
-1.  Open **HACS** in your Home Assistant sidebar.
-2.  Click the three dots in the top right corner and select **Custom repositories**.
-3.  Enter `https://github.com/ThePastPlayer/IsItDead` as the Repository and select **Integration** as the Category.
-4.  Click **Add**, then select **Is It Dead?** from the HACS list and download it.
-5.  **Restart** Home Assistant.
-6.  Go to **Settings > Devices & Services > Add Integration**, search for **Is It Dead?**, and follow the prompts.
+## Development
 
----
+Tests use Home Assistant 2026.7.2 with pytest and pytest-asyncio, Python 3.14 on Linux.
+Install `requirements-test.txt` in an isolated environment.
+Run `python -m pytest -q` and `node --check custom_components/is_it_dead/frontend/is_it_dead_panel.js`.
+Live device identifiers, credentials and diagnostic dumps must not be committed.
 
-## ⚙️ Configuration & Exclusions
+## Native Zigbee monitoring (1.2)
 
-You can configure the integration settings at any time by clicking **Configure** on the integration card:
-*   **Monitored Domains**: Select which domains to watch (e.g., `sensor`, `binary_sensor`).
-*   **Learning Period (Days)**: How long to monitor check-ins before enforcing calculations (defaults to 7 days, with fallback to maximum timeout during learning).
-*   **Threshold Multiplier**: Set how many times the learned average check-in rate a sensor can miss before it is marked dead (e.g., $3.0\times$).
-*   **Min / Max Timeout Limits**: Restrict calculations (e.g., minimum 1 hour, maximum 7 days) to prevent anomaly spikes.
-*   **Excluded Entities**: Select entities to ignore from tracking (pre-populated with suggested inactive sensors).
-*   **Custom Timeout YAML**: Provide manual overrides for specific entity IDs (e.g., `sensor.living_room_motion: 12.0` in hours).
+ZHA: reads the actual zigpy last radio contact and ZHA availability.
+Zigbee2MQTT: discovers topics from MQTT discovery and follows native availability,
+bridge health and explicit `last_seen`. Enable availability and set
+`advanced.last_seen: ISO_8601` in Zigbee2MQTT (restart may be required).
+MQTT delivery or a retained cached value alone is never counted as a new radio packet.
 
----
+The **Vérifier Zigbee** button calls `is_it_dead.check_device` with `device_id`.
+ZHA reads a Basic cluster attribute without cache. Zigbee2MQTT only requests a
+read-only property explicitly advertised with GET support by its converter.
+A positive reply confirms contact; no reply is inconclusive. Reads are limited
+to one concurrent request, 12 seconds and a five-minute cooldown per device.
+Snooze only mutes alerts; passive monitoring continues. There is no repeated
+reconfiguration, forced pairing, binding or automatic network-map scan.
 
-## 🔌 Custom Service Endpoints
+Battery devices which sleep cannot be awakened remotely. Zigbee2MQTT defaults
+to a 25-hour passive availability deadline; powered devices can be actively checked.
+A topology map may contain old entries and is not proof that a battery device is
+alive. Devices with no periodic heartbeat need a model-specific deadline or a
+physical functional check; no software can eliminate that uncertainty.
 
-The integration registers four services for automation or custom dashboard calls:
-
-### `is_it_dead.snooze_entity`
-Temporarily mutes dead alerts for a specific sensor.
-*   `entity_id` *(Required)*: The entity ID of the dead sensor.
-*   `duration_hours` *(Optional, default: 24)*: Hours to mute. Set to `0` to unsnooze immediately.
-
-### `is_it_dead.exclude_entity`
-Excludes a sensor from monitoring, automatically updating the integration options.
-*   `entity_id` *(Required)*: The entity ID of the sensor.
-
-### `is_it_dead.relearn_entity`
-Clears update interval statistics for a sensor and restarts the learning phase.
-*   `entity_id` *(Required)*: The entity ID of the sensor.
-
-### `is_it_dead.set_manual_timeout`
-Sets a manual override timeout threshold for a specific sensor.
-*   `entity_id` *(Required)*: The entity ID of the sensor.
-*   `timeout_hours` *(Required)*: Override limit in hours. Set to `0` to disable the override.
-
----
-
-## 🔔 Actionable Blueprint Automation
-
-The integration automatically installs an automation blueprint located in your config folder under `blueprints/automation/is_it_dead/is_it_dead_alert.yaml`.
-
-To set it up:
-1.  Go to **Settings > Automations & Scenes > Blueprints**.
-2.  Locate **Is It Dead? Actionable Alerts** and click **Create Automation**.
-3.  Select your aggregate sensor (`binary_sensor.is_it_dead_alert`), choose your mobile device to receive push alerts, and save.
-4.  When a sensor goes offline, your phone will receive a push notification with two actionable buttons:
-    *   **Snooze 24h**: Automatically silences notifications for the dead sensor for 24 hours.
-    *   **Exclude Silent**: Adds the sensor to the exclusions list to ignore it.
+The panel keeps expanded entity lists mounted during state refreshes. Install
+frontend test dependencies with `npm ci`, then run `npm test`.

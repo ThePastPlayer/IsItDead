@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any
 import voluptuous as vol
 import yaml
@@ -54,12 +55,18 @@ class IsItDeadConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Handle the initial user setup step."""
+        if self._async_current_entries():
+            return self.async_abort(reason="single_instance_allowed")
         errors: dict[str, str] = {}
+        if user_input and user_input.get(CONF_MIN_TIMEOUT, 1) > user_input.get(CONF_MAX_TIMEOUT, 168):
+            errors["base"] = "invalid_timeout_range"
 
         if user_input is not None:
             if not user_input.get(CONF_MONITORED_DOMAINS):
                 errors[CONF_MONITORED_DOMAINS] = "invalid_domains"
-            else:
+            elif not errors:
+                await self.async_set_unique_id(DOMAIN)
+                self._abort_if_unique_id_configured()
                 return self.async_create_entry(title="Is It Dead?", data=user_input)
 
         schema = vol.Schema(
@@ -127,6 +134,8 @@ class IsItDeadOptionsFlowHandler(config_entries.OptionsFlow):
     ) -> ConfigFlowResult:
         """Handle the options flow step."""
         errors: dict[str, str] = {}
+        if user_input and user_input.get(CONF_MIN_TIMEOUT, 1) > user_input.get(CONF_MAX_TIMEOUT, 168):
+            errors["base"] = "invalid_timeout_range"
 
         # Get current configuration values
         current_domains = self.config_entry.options.get(
@@ -187,7 +196,9 @@ class IsItDeadOptionsFlowHandler(config_entries.OptionsFlow):
                                 errors[CONF_CUSTOM_TIMEOUTS] = "invalid_yaml"
                                 break
                             try:
-                                float(v)
+                                value = float(v)
+                                if not math.isfinite(value) or value <= 0:
+                                    raise ValueError("Timeout must be positive and finite")
                             except (ValueError, TypeError):
                                 errors[CONF_CUSTOM_TIMEOUTS] = "invalid_yaml"
                                 break
@@ -212,7 +223,7 @@ class IsItDeadOptionsFlowHandler(config_entries.OptionsFlow):
                 proposed_exclusions.append(entity_id)
 
         # Merge current excluded list and proposed exclusions
-        suggested_exclusions = list(set(current_excluded + proposed_exclusions))
+        suggested_exclusions = list(current_excluded)  # Never silently exclude unobserved/dead sensors.
 
         # Dynamically discover all integrations that provide entities in monitored domains
         from homeassistant.helpers import entity_registry as er

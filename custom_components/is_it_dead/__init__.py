@@ -22,10 +22,14 @@ from homeassistant.helpers import (
 )
 from homeassistant.helpers.event import (
     async_track_state_change_event,
+    async_track_state_report_event,
     async_track_time_interval,
 )
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
+
+from .zigbee import ZigbeeEvidence
+from .health import assess, deadline, number, timestamp
 
 from .const import (
     CONF_BATTERY_ONLY,
@@ -82,14 +86,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         _LOGGER.error("Failed to set up binary_sensor platform: %s", err, exc_info=True)
         raise
 
+    # Register once: static routes survive an integration reload.
     # Register the frontend static directory
     frontend_path = hass.config.path("custom_components/is_it_dead/frontend")
     try:
         # Modern HA (2024.7+): async_register_static_paths
         from homeassistant.components.http import StaticPathConfig
-        await hass.http.async_register_static_paths(
-            [StaticPathConfig("/is_it_dead_ui", frontend_path, False)]
-        )
+        if not hass.data.get("is_it_dead_static_registered", False):
+            await hass.http.async_register_static_paths(
+                [StaticPathConfig("/is_it_dead_ui", frontend_path, False)]
+            )
+            hass.data["is_it_dead_static_registered"] = True
         _LOGGER.debug("Registered static path via async_register_static_paths")
     except (ImportError, AttributeError):
         # Fallback for older HA versions
@@ -100,15 +107,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             _LOGGER.warning("Could not register static path for frontend panel")
 
     # Register the sidebar panel
-    from homeassistant.components.frontend import async_register_panel
+    from homeassistant.components.panel_custom import async_register_panel
     try:
-        async_register_panel(
+        await async_register_panel(
             hass,
             frontend_url_path="is_it_dead",
             webcomponent_name="is-it-dead-panel",
             sidebar_title="Is It Dead?",
             sidebar_icon="mdi:battery-alert",
-            module_url="/is_it_dead_ui/is_it_dead_panel.js",
+            module_url="/is_it_dead_ui/is_it_dead_panel.js?v=1.2.0",
             require_admin=False,
         )
         _LOGGER.info("Registered 'Is It Dead?' sidebar panel")
@@ -234,9 +241,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
             break
 
+    async def async_handle_check_device(call):
+        for m in hass.data[DOMAIN].values():
+            if call.data["device_id"] in m._device_entity_map:
+                await m.zigbee.probe(call.data["device_id"])
+                m._refresh_health()
+                m.notify_listeners(None)
+                break
+
     # Register device-level services
     device_schema = vol.Schema({vol.Required("device_id"): cv.string})
     for svc_name, handler in (
+        ("check_device", async_handle_check_device),
         ("exclude_device", async_handle_exclude_device),
         ("relearn_device", async_handle_relearn_device),
     ):
@@ -288,7 +304,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
 
     # Watch for entry updates (options changes) and reload if they happen
-    entry.async_on_unload(entry.add_to_updates_listener(async_reload_entry))
+    entry.async_on_unload(entry.add_update_listener(async_reload_entry))
 
     return True
 
@@ -309,7 +325,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             all_services = (
                 "exclude_entity", "snooze_entity", "relearn_entity",
                 "set_manual_timeout", "exclude_device", "snooze_device",
-                "relearn_device",
+                "relearn_device", "check_device",
             )
             for service in all_services:
                 if hass.services.has_service(DOMAIN, service):
@@ -386,6 +402,13 @@ class IsItDeadManager:
         self.listeners: list[Any] = []
         self._unsub_state_change = None
         self._unsub_periodic = None
+        self._tracked_ids = set()
+        self._startup = dt_util.utcnow().timestamp()
+        self.zigbee = ZigbeeEvidence(self)
+        self._health_cache = {}
+        self._pending = {}
+        self._signal_pending = {}
+        self._next_publish = 0.0
         self.async_add_new_devices_callback = None
 
         # Cache: device_id -> list of entity_ids
@@ -405,6 +428,13 @@ class IsItDeadManager:
         else:
             self.learned_data = stored
 
+        # Old state-change averages are not heartbeat evidence. Preserve snoozes.
+        for info in self.learned_data.get("entities", {}).values():
+            if "learning_started" not in info:
+                info.pop("last_report_ts", None)
+                info["intervals"] = []
+                info["count"] = 0
+
         # Set or maintain learning phase start timestamp
         if "learning_start_time" not in self.learned_data:
             self.learned_data["learning_start_time"] = dt_util.utcnow().isoformat()
@@ -413,14 +443,9 @@ class IsItDeadManager:
         # Build device-entity mapping and start tracking
         self._rebuild_device_map()
 
-        all_entity_ids = []
-        for entities in self._device_entity_map.values():
-            all_entity_ids.extend(entities)
-
-        if all_entity_ids:
-            self._unsub_state_change = async_track_state_change_event(
-                self.hass, all_entity_ids, self._async_handle_state_change
-            )
+        self._refresh_tracking()
+        await self.zigbee.refresh()
+        self._refresh_health()
 
         # Populate initial battery history
         for device_id, entity_ids in self._device_entity_map.items():
@@ -439,6 +464,7 @@ class IsItDeadManager:
 
     async def async_unload(self) -> None:
         """Unsubscribe listeners and save final data."""
+        await self.zigbee.close()
         if self._unsub_state_change:
             self._unsub_state_change()
         if self._unsub_periodic:
@@ -465,8 +491,8 @@ class IsItDeadManager:
         skipped_standalone = 0
         skipped_battery = 0
 
-        for state in self.hass.states.async_all():
-            entity_id = state.entity_id
+        candidates = set(self.hass.states.async_entity_ids()) | set(entity_reg.entities)
+        for entity_id in sorted(candidates):
             domain = entity_id.split(".")[0]
 
             if domain not in self.monitored_domains:
@@ -500,7 +526,7 @@ class IsItDeadManager:
                     skipped_standalone += 1
                     continue
                 elif self.standalone_entities == "group":
-                    device_id = "__standalone__"
+                    device_id = f"__standalone_{entity_id}__"
                 else:  # "track" — each gets its own virtual device
                     device_id = f"__standalone_{entity_id}__"
 
@@ -559,8 +585,6 @@ class IsItDeadManager:
 
     def get_monitored_devices(self) -> dict[str, dict[str, Any]]:
         """Get the current device_id -> device_info mapping."""
-        self._rebuild_device_map()
-
         dev_reg = dr.async_get(self.hass)
         entity_reg = er.async_get(self.hass)
         area_reg = ar.async_get(self.hass)
@@ -585,7 +609,7 @@ class IsItDeadManager:
                 if device:
                     area_id = getattr(device, "area_id", None)
                     if area_id:
-                        area = area_reg.async_get(area_id)
+                        area = area_reg.async_get_area(area_id)
                         if area:
                             area_name = getattr(area, "name", None)
 
@@ -616,7 +640,7 @@ class IsItDeadManager:
                     "Error building device info for %s: %s", device_id, err, exc_info=True
                 )
 
-        _LOGGER.info("get_monitored_devices returning %d devices", len(result))
+        _LOGGER.debug("get_monitored_devices returning %d devices", len(result))
         return result
 
     def get_entities_for_device(self, device_id: str) -> list[str]:
@@ -637,159 +661,168 @@ class IsItDeadManager:
     # ── Learning & timeout logic ────────────────────────────────────────
 
     def is_learning(self) -> bool:
-        """Check if the global learning phase is active."""
-        start_time_str = self.learned_data.get("learning_start_time")
-        if not start_time_str:
-            return True
-        start_time = dt_util.parse_datetime(start_time_str)
-        if not start_time:
-            return True
-        return (dt_util.utcnow() - start_time) < timedelta(days=self.learning_period)
-
-    def get_timeout_for_device(self, device_id: str) -> float:
-        """Get the timeout threshold (seconds) for a device.
-
-        Uses the BEST (shortest) learned interval among all entities in the device.
-        """
-        entities_data = self.learned_data.get("entities", {})
-        entity_ids = self.get_entities_for_device(device_id)
-
-        best_interval = None
-        for entity_id in entity_ids:
-            # Check custom override
-            if entity_id in self.custom_timeouts:
-                custom_sec = self.custom_timeouts[entity_id] * 3600.0
-                if best_interval is None or custom_sec < best_interval:
-                    best_interval = custom_sec
-                continue
-
-            entity_info = entities_data.get(entity_id)
-            if entity_info and entity_info.get("count", 0) > 0:
-                avg = entity_info["average_interval"]
-                if best_interval is None or avg < best_interval:
-                    best_interval = avg
-
-        if best_interval is not None:
-            timeout = best_interval * self.multiplier
-            min_sec = self.min_timeout * 3600.0
-            max_sec = self.max_timeout * 3600.0
-            return max(min(timeout, max_sec), min_sec)
-
-        # Fallback: max timeout
-        return self.max_timeout * 3600.0
-
-    def update_learned_data(self, entity_id: str, interval: float, count: int = 1) -> None:
-        """Calculate and store running average update interval for an entity."""
-        entities_data = self.learned_data.setdefault("entities", {})
-        entity_info = entities_data.setdefault(
-            entity_id, {"count": 0, "average_interval": 0.0}
+        """Report current per-device evidence gaps, not a stale global boot date."""
+        return not self._health_cache or any(
+            h["health_status"] == "learning" for h in self._health_cache.values()
         )
 
-        current_count = entity_info.get("count", 0)
-        current_avg = entity_info.get("average_interval", 0.0)
+    def get_timeout_for_device(self, device_id: str) -> float:
+        rows = self._health_cache.get(device_id, {}).get("entity_details", [])
+        thresholds = [r["timeout"] for r in rows if r.get("timeout")]
+        return max(thresholds) if thresholds else self.max_timeout * 3600
 
-        if current_count == 0:
-            entity_info["average_interval"] = interval
-            entity_info["count"] = count
-        else:
-            new_count = min(current_count + count, 50)
-            entity_info["average_interval"] = (
-                current_avg * (new_count - count) + interval * count
-            ) / new_count
-            entity_info["count"] = new_count
+    def update_learned_data(self, entity_id: str, interval: float, count: int = 1) -> None:
+        if number(interval) is None or interval <= 1:
+            return
+        info = self.learned_data.setdefault("entities", {}).setdefault(entity_id, {})
+        samples = info.setdefault("intervals", [])
+        samples.append(interval)
+        info["intervals"] = samples[-50:]
+        info["count"] = len(info["intervals"])
+        info["average_interval"] = sum(info["intervals"]) / info["count"]
 
-    # ── Device health assessment ────────────────────────────────────────
+    def _refresh_tracking(self):
+        ids = set(self._entity_to_device)
+        if ids == self._tracked_ids:
+            return
+        if self._unsub_state_change:
+            self._unsub_state_change()
+        self._tracked_ids = ids
+        # Filtered state_reported catches unchanged values too. The filter consults
+        # the current map and never subscribes to every entity in Home Assistant.
+        unsubs = []
+        if ids:
+            unsubs = [
+                async_track_state_change_event(self.hass, ids, self._async_handle_state_change),
+                async_track_state_report_event(self.hass, ids, self._async_handle_state_change),
+            ]
+        self._unsub_state_change = lambda: [unsub() for unsub in unsubs]
+
+    def _evidence(self, device_id):
+        now = dt_util.utcnow().timestamp()
+        registry = er.async_get(self.hass)
+        rows = []
+        native = self.zigbee.snapshot(device_id)
+        seen_values = [native["last_seen"]] if native.get("last_seen") else []
+        for ent in er.async_entries_for_device(registry, device_id):
+            state = self.hass.states.get(ent.entity_id)
+            if state and ent.disabled_by is None and not state.attributes.get("restored"):
+                value = timestamp(state.state, now) if ent.entity_id.endswith("last_seen") else timestamp(state.attributes.get("last_seen"), now)
+                if value is not None:
+                    seen_values.append(value)
+        device_last_seen = max(seen_values) if seen_values else None
+        for eid in self.get_entities_for_device(device_id):
+            state = self.hass.states.get(eid)
+            reg = registry.async_get(eid)
+            attrs = state.attributes if state else {}
+            dc = attrs.get("device_class") or getattr(reg, "original_device_class", None)
+            platform = getattr(reg, "platform", "")
+            diagnostic = dc in ("battery", "signal_strength", "timestamp") or any(
+                tag in eid for tag in ("battery", "linkquality", "rssi", "last_seen")
+            )
+            physical = platform != "battery_notes" and not diagnostic
+            valid = bool(state and state.state not in (STATE_UNKNOWN, STATE_UNAVAILABLE) and not attrs.get("restored"))
+            info = self.learned_data.get("entities", {}).get(eid, {})
+            last = timestamp(info.get("last_report_ts"), now)
+            if native.get("available") is False:
+                valid = False
+            source = "integration_report"
+            explicit = device_last_seen
+            if explicit is not None:
+                last, source = explicit, "zigbee_last_seen" if native.get("last_seen") == explicit else "last_seen"
+            manual = self.custom_timeouts.get(eid)
+            timeout = deadline(info, manual, self.min_timeout, self.max_timeout,
+                               self.multiplier, self.learning_period, now)
+            if explicit is not None and timeout is None:
+                timeout = self.max_timeout * 3600
+            # Motion/contact/button changes are not a periodic physical heartbeat.
+            if eid.startswith("binary_sensor.") and not manual and explicit is None:
+                timeout = None
+            rows.append({"entity_id": eid, "physical": physical, "valid": valid,
+                         "state": state.state if state else STATE_UNAVAILABLE,
+                         "last": last, "source": source, "timeout": timeout,
+                         "last_reported": dt_util.utc_from_timestamp(last).isoformat() if last else None})
+        # Devices exposing only a battery reading still deserve surveillance.
+        if rows and not any(r["physical"] for r in rows):
+            for row in rows:
+                if "battery" in row["entity_id"] and getattr(registry.async_get(row["entity_id"]), "platform", "") != "battery_notes":
+                    row["physical"] = True
+        return rows
+
+    def _refresh_health(self):
+        now = dt_util.utcnow().timestamp()
+        for did in self._device_entity_map:
+            rows = self._evidence(did)
+            result = assess(rows, now, self._startup, self.min_timeout)
+            native = self.zigbee.snapshot(did)
+            if native.get("bridge_available") is False:
+                result.update(health_status="suspected", reason="zigbee_bridge_offline", candidate=None, confidence="high")
+            elif result["health_status"] == "alive" and native.get("last_seen"):
+                result.update(reason="recent_zigbee_report", confidence="high")
+            candidate = result["candidate"]
+            previous = self._pending.get(did)
+            if not candidate:
+                self._pending.pop(did, None)
+            elif previous is None or previous[0] != candidate:
+                self._pending[did] = (candidate, now)
+            elif now - previous[1] >= max(300, self.update_interval * 60):
+                result = assess(rows, now, self._startup, self.min_timeout, confirmed=True)
+            self._health_cache[did] = result
+        for did in set(self._health_cache) - set(self._device_entity_map):
+            self._health_cache.pop(did, None)
+            self._pending.pop(did, None)
 
     def evaluate_device_health(self, device_id: str) -> dict[str, Any]:
-        """Evaluate the health status of a device and return detailed info.
+        return self._health_cache.get(device_id, {
+            "health_status": "learning", "reason": "not_monitored", "confidence": "none",
+            "silent_entities": [], "active_entities": [], "entity_details": [],
+        })
 
-        Returns a dict with:
-            health_status: "alive" | "suspected" | "dead" | "learning"
-            last_activity: ISO datetime of most recent entity report
-            last_active_entity: entity_id that reported most recently
-            silent_entities: list of entity_ids that haven't reported within threshold
-            active_entities: list of entity_ids that reported recently
-            entity_details: list of dicts with per-entity info
-        """
-        entity_ids = self.get_entities_for_device(device_id)
-        if not entity_ids:
-            return {
-                "health_status": "dead",
-                "last_activity": None,
-                "last_active_entity": None,
-                "silent_entities": [],
-                "active_entities": [],
-                "entity_details": [],
-            }
+    def is_snoozed(self, device_id):
+        values = self.learned_data.get("snoozed", {})
+        ids = self.get_entities_for_device(device_id)
+        now = dt_util.utcnow().timestamp()
+        return bool(ids) and all((timestamp(values.get(eid), float("inf")) or 0) > now for eid in ids)
 
-        now = dt_util.utcnow()
-        timeout = self.get_timeout_for_device(device_id)
-        entities_data = self.learned_data.get("entities", {})
+    def battery_warning(self, device_id):
+        _, level = self.get_battery_info_for_device(device_id)
+        if level is not None and level <= 20:
+            return True
+        registry = er.async_get(self.hass)
+        for ent in er.async_entries_for_device(registry, device_id):
+            state = self.hass.states.get(ent.entity_id)
+            if state and state.attributes.get("device_class") == "battery" and ent.domain == "binary_sensor" and state.state == "on":
+                return True
+        return False
 
-        last_activity = None
-        last_active_entity = None
-        silent_entities = []
-        active_entities = []
-        entity_details = []
-        has_any_data = False
+    def network_info(self, device_id):
+        registry = er.async_get(self.hass)
+        readings = []
+        now = dt_util.utcnow().timestamp()
+        for ent in er.async_entries_for_device(registry, device_id):
+            state = self.hass.states.get(ent.entity_id)
+            if not state or ent.disabled_by is not None:
+                continue
+            value = number(state.state)
+            unit = state.attributes.get("unit_of_measurement")
+            if value is None:
+                continue
+            kind = "rssi" if unit == "dBm" else "lqi" if "linkquality" in ent.entity_id else None
+            if not kind or (kind == "rssi" and not -130 <= value <= 0) or (kind == "lqi" and not 0 <= value <= 255):
+                continue
+            last = timestamp(self.learned_data.get("entities", {}).get(ent.entity_id, {}).get("last_report_ts"), now)
+            fresh = last is not None and now - last <= min(86400, self.max_timeout * 3600)
+            readings.append({"entity_id": ent.entity_id, "kind": kind, "value": value,
+                             "unit": unit, "fresh": fresh, "reported_at": last, "weak": fresh and value <= (-85 if kind == "rssi" else 40)})
+        return readings
 
-        for entity_id in entity_ids:
-            state = self.hass.states.get(entity_id)
-            entity_info = entities_data.get(entity_id, {})
-
-            # Determine last reported time
-            last_reported = None
-            if state:
-                last_reported = state.last_reported or state.last_updated
-            if not last_reported and "last_report_ts" in entity_info:
-                last_reported = dt_util.parse_datetime(entity_info["last_report_ts"])
-
-            detail = {
-                "entity_id": entity_id,
-                "last_reported": last_reported.isoformat() if last_reported else None,
-                "state": state.state if state else "unavailable",
-            }
-            entity_details.append(detail)
-
-            if last_reported:
-                has_any_data = True
-                elapsed = (now - last_reported).total_seconds()
-                if elapsed > timeout:
-                    silent_entities.append(entity_id)
-                else:
-                    active_entities.append(entity_id)
-
-                # Track most recent activity across all entities
-                if last_activity is None or last_reported > last_activity:
-                    last_activity = last_reported
-                    last_active_entity = entity_id
-            elif state and state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
-                silent_entities.append(entity_id)
-            elif not state:
-                silent_entities.append(entity_id)
-            else:
-                # Entity exists but no timestamp — treat as unknown
-                if not self.is_learning():
-                    silent_entities.append(entity_id)
-
-        # Determine health status
-        if not has_any_data:
-            health = "learning" if self.is_learning() else "dead"
-        elif len(active_entities) > 0 and len(silent_entities) > 0:
-            health = "suspected"
-        elif len(active_entities) == 0:
-            health = "dead"
-        else:
-            health = "alive"
-
-        return {
-            "health_status": health,
-            "last_activity": last_activity.isoformat() if last_activity else None,
-            "last_active_entity": last_active_entity,
-            "silent_entities": silent_entities,
-            "active_entities": active_entities,
-            "entity_details": entity_details,
-        }
+    def network_warning(self, device_id):
+        pending = self._signal_pending.get(device_id)
+        if pending is None:
+            return False
+        since, first_report = pending
+        return (dt_util.utcnow().timestamp() - since >= max(300, self.update_interval * 60)
+                and any(r["weak"] and r["reported_at"] > first_report for r in self.network_info(device_id)))
 
     # ── Battery helpers ─────────────────────────────────────────────────
 
@@ -807,7 +840,9 @@ class IsItDeadManager:
                     unit = sensor_state.attributes.get("unit_of_measurement")
                     if dc == "battery" or (unit == "%" and "battery" in entry.entity_id):
                         try:
-                            return entry.entity_id, float(sensor_state.state)
+                            value = number(sensor_state.state)
+                            if value is not None and 0 <= value <= 100 and unit == "%":
+                                return entry.entity_id, value
                         except (ValueError, TypeError):
                             pass
         return None, None
@@ -850,124 +885,12 @@ class IsItDeadManager:
             history_list.pop(0)
 
     def estimate_battery_depletion(self, device_id: str) -> dict[str, Any]:
-        """Estimate remaining battery life and depletion date for a device."""
-        battery_tracking = self.learned_data.get("battery_tracking", {})
-        battery_data = battery_tracking.get(device_id, {})
-        history_list = battery_data.get("history", [])
-
-        # Check for recharging
-        for idx in range(1, len(history_list)):
-            if history_list[idx]["val"] > history_list[idx - 1]["val"]:
-                return {
-                    "depletion_time": None, "depletion_days": None,
-                    "discharge_rate_per_day": None,
-                    "status": "Battery charged, recalculating...",
-                }
-
-        if len(history_list) < 2:
-            return {
-                "depletion_time": None, "depletion_days": None,
-                "discharge_rate_per_day": None,
-                "status": "Learning battery discharge...",
-            }
-
-        first, last = history_list[0], history_list[-1]
-        first_time = dt_util.parse_datetime(first["ts"])
-        last_time = dt_util.parse_datetime(last["ts"])
-        if not first_time or not last_time:
-            return {"status": "Error parsing history"}
-
-        time_diff = (last_time - first_time).total_seconds()
-        val_diff = first["val"] - last["val"]
-
-        if val_diff <= 0 or time_diff == 0:
-            return {
-                "depletion_time": None, "depletion_days": None,
-                "discharge_rate_per_day": 0.0, "status": "Battery stable",
-            }
-
-        rate_per_day = (val_diff / time_diff) * 86400.0
-        days_remaining = last["val"] / rate_per_day
-        depletion_dt = last_time + timedelta(days=days_remaining)
-
-        return {
-            "depletion_time": depletion_dt.isoformat(),
-            "depletion_days": round(days_remaining, 1),
-            "discharge_rate_per_day": round(rate_per_day, 3),
-            "status": f"Estimated remaining: {round(days_remaining, 1)} days",
-        }
-
-    # ── History backfill ────────────────────────────────────────────────
+        return {"depletion_time": None, "depletion_days": None,
+                "status": "No reliable lifetime prediction from percentage alone"}
 
     async def async_backfill_history(self) -> None:
-        """Backfill average intervals using recorder history (runs in background)."""
-        try:
-            from homeassistant.components.recorder import get_instance
-            recorder = get_instance(self.hass)
-            await recorder.async_db_ready
-        except (ImportError, AttributeError):
-            from homeassistant.components.recorder import DOMAIN as RECORDER_DOMAIN
-            if RECORDER_DOMAIN in self.hass.data:
-                recorder = self.hass.data[RECORDER_DOMAIN]
-                if hasattr(recorder, "db_connected"):
-                    try:
-                        await recorder.db_connected
-                    except Exception as err:
-                        _LOGGER.error("Error waiting for recorder connection: %s", err)
-        except Exception as err:
-            _LOGGER.error("Error waiting for recorder: %s", err)
-
-        _LOGGER.info("Starting background history backfill for 'Is It Dead?'")
-        entity_ids = self.get_all_monitored_entity_ids()
-        if not entity_ids:
-            _LOGGER.info("No entities found to backfill history")
-            return
-
-        start_time = dt_util.utcnow() - timedelta(days=self.learning_period)
-        end_time = dt_util.utcnow()
-
-        entities_data = self.learned_data.setdefault("entities", {})
-        for entity_id in entity_ids:
-            entities_data.setdefault(entity_id, {"count": 0, "average_interval": 0.0})
-
-        try:
-            from homeassistant.components.recorder.history import get_significant_states
-        except ImportError:
-            _LOGGER.warning("Could not import get_significant_states — skipping backfill")
-            return
-
-        chunk_size = 15
-        for i in range(0, len(entity_ids), chunk_size):
-            chunk = entity_ids[i : i + chunk_size]
-            try:
-                states_history = await self.hass.async_add_executor_job(
-                    get_significant_states, self.hass, start_time, end_time, chunk,
-                )
-                for entity_id, states in states_history.items():
-                    if len(states) < 2:
-                        continue
-                    intervals = []
-                    for j in range(1, len(states)):
-                        t1 = states[j - 1].last_reported or states[j - 1].last_updated
-                        t2 = states[j].last_reported or states[j].last_updated
-                        if t1 and t2:
-                            diff = (t2 - t1).total_seconds()
-                            if diff > 1.0:
-                                intervals.append(diff)
-                    if intervals:
-                        avg_interval = sum(intervals) / len(intervals)
-                        self.update_learned_data(entity_id, avg_interval, len(intervals))
-                        last_state = states[-1]
-                        last_ts = last_state.last_reported or last_state.last_updated
-                        if last_ts:
-                            entities_data[entity_id]["last_report_ts"] = last_ts.isoformat()
-            except Exception as err:
-                _LOGGER.error("History backfill failed for chunk %s: %s", chunk, err)
-            await asyncio.sleep(0.1)
-
-        await self._store.async_save(self.learned_data)
-        _LOGGER.info("Finished history backfill successfully")
-        self.notify_listeners(None)
+        """Recorder stores changes, not all physical reports: never learn heartbeats from it."""
+        return
 
     # ── Event handlers ──────────────────────────────────────────────────
 
@@ -977,17 +900,20 @@ class IsItDeadManager:
         entity_id = event.data["entity_id"]
         new_state = event.data["new_state"]
 
-        if not new_state:
+        if not new_state or new_state.attributes.get("restored"):
             return
 
         # Find which device this entity belongs to
         device_id = self._entity_to_device.get(entity_id)
 
         if new_state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
-            self.notify_listeners(device_id)
             return
 
         new_ts = new_state.last_reported or new_state.last_updated
+        native = self.zigbee.snapshot(device_id) if device_id else {}
+        explicit = native.get("last_seen") or timestamp(new_state.attributes.get("last_seen"), dt_util.utcnow().timestamp())
+        if explicit is not None:
+            new_ts = dt_util.utc_from_timestamp(explicit)
         if not new_ts:
             return
 
@@ -997,6 +923,7 @@ class IsItDeadManager:
             entity_id, {"count": 0, "average_interval": 0.0}
         )
 
+        entity_info.setdefault("learning_started", new_ts.isoformat())
         last_ts_str = entity_info.get("last_report_ts")
         if last_ts_str:
             last_ts = dt_util.parse_datetime(last_ts_str)
@@ -1005,6 +932,8 @@ class IsItDeadManager:
                 if interval > 1.0:
                     self.update_learned_data(entity_id, interval)
 
+        if last_ts_str and dt_util.parse_datetime(last_ts_str) >= new_ts:
+            return
         entity_info["last_report_ts"] = new_ts.isoformat()
 
         # Update device-level battery tracking
@@ -1013,12 +942,23 @@ class IsItDeadManager:
             if bat_id and bat_lvl is not None:
                 self.update_battery_history(device_id, bat_id, bat_lvl)
 
-        self.notify_listeners(device_id)
+        # State report volume can be high; publish at most once per minute.
+        now = dt_util.utcnow().timestamp()
+        if now >= self._next_publish:
+            self._next_publish = now + 60
+            self._refresh_health()
+            self.notify_listeners(None)
 
     async def _async_handle_periodic(self, _now_time) -> None:
         """Run periodic check across all devices and save data."""
         # Refresh device map to pick up new entities
         self._rebuild_device_map()
+
+        self._refresh_tracking()
+        await self.zigbee.refresh()
+        self._refresh_health()
+        if self.async_add_new_devices_callback:
+            self.async_add_new_devices_callback(list(self._device_entity_map))
 
         # Update battery for all devices
         for device_id in self._device_entity_map:
@@ -1027,6 +967,13 @@ class IsItDeadManager:
                 if bat_id and bat_lvl is not None:
                     self.update_battery_history(device_id, bat_id, bat_lvl)
 
+        now = dt_util.utcnow().timestamp()
+        for did in self._device_entity_map:
+            weak = [r for r in self.network_info(did) if r["weak"]]
+            if weak:
+                self._signal_pending.setdefault(did, (now, max(r["reported_at"] for r in weak)))
+            else:
+                self._signal_pending.pop(did, None)
         await self._store.async_save(self.learned_data)
         self.notify_listeners(None)
 

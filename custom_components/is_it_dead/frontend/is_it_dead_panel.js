@@ -7,6 +7,9 @@ class IsItDeadPanel extends HTMLElement {
     this._searchQuery = "";
     this._devices = [];
     this._expandedDevices = new Set();
+    this._testOpen = false;
+    this._testTimer = null;
+    this._testBusy = false;
   }
 
   set hass(val) {
@@ -16,6 +19,142 @@ class IsItDeadPanel extends HTMLElement {
 
   connectedCallback() {
     this.render();
+    if (this._testOpen && !this._testTimer) this._testTimer = setInterval(() => this._pollTest(), 2000);
+  }
+
+  disconnectedCallback() {
+    clearInterval(this._testTimer);
+    this._testTimer = null;
+  }
+
+  async _testCall(service, data = {}) {
+    const result = await this._hass.callWS({type: "call_service", domain: "is_it_dead", service,
+      service_data: data, return_response: true});
+    return result.response || {};
+  }
+
+  async _openTest(onlyDevice = null) {
+    this._testOpen = true;
+    this._testError = "";
+    this._testStage = "loading";
+    this._renderTest();
+    try {
+      this._testPreview = await this._testCall("test_preview");
+      this._testSession = this._testPreview.session || {};
+      this._testSelected = new Set(onlyDevice ? [onlyDevice] : this._testPreview.devices.filter(d => d.needs_wake).map(d => d.device_id));
+      this._testShowAll = !!onlyDevice;
+      this._testStage = this._testSession.active || this._testSession.restore?.length ? "running" : "select";
+      clearInterval(this._testTimer);
+      this._testTimer = setInterval(() => this._pollTest(), 2000);
+    } catch (error) { this._testError = error.message || String(error); }
+    this._renderTest();
+  }
+
+  async _pollTest() {
+    if (!this._testOpen || this._testBusy || this._pollingTest || this._testStage !== "running") return;
+    this._pollingTest = true;
+    try {
+      this._testSession = await this._testCall("test_status");
+      this._testError = "";
+      this._renderTest();
+    } catch (error) {
+      this._testError = "Connexion interrompue. La limite de durée et la restauration restent gérées par Home Assistant. " + (error.message || error);
+      this._renderTest();
+    } finally { this._pollingTest = false; }
+  }
+
+  async _testAction(event) {
+    const button = event.target.closest("[data-test-action]");
+    if (!button || this._testBusy) return;
+    const action = button.dataset.testAction;
+    if (action === "close") {
+      this._testOpen = false;
+      clearInterval(this._testTimer);
+      this._testTimer = null;
+      this._renderTest();
+      return;
+    }
+    this._testBusy = true;
+    this._testError = "";
+    this._renderTest();
+    try {
+      if (action === "all" || action === "uncovered") {
+        this._testSelected = new Set(this._testPreview.devices.filter(d => action === "all" || d.needs_wake).map(d => d.device_id));
+        this._testShowAll = action === "all";
+      } else if (action === "review") {
+        this._testPreview = await this._testCall("test_preview", {device_ids: [...this._testSelected]});
+        this._testAutomations = new Set(this._testPreview.automations.filter(a => a.related && a.state === "on").map(a => a.entity_id));
+        this._testStage = "review";
+      } else if (action === "back") {
+        this._testStage = "select";
+      } else if (action === "start") {
+        this._testSession = await this._testCall("start_test", {device_ids: [...this._testSelected],
+          automation_ids: [...this._testAutomations], minutes: 30});
+        this._testStage = "running";
+      } else if (action === "end") {
+        this._testSession = await this._testCall("end_test");
+      } else if (action === "confirm") {
+        this._testSession = await this._testCall("confirm_test", {device_id: button.dataset.testDevice});
+      } else if (action === "new") {
+        this._testStage = "select";
+      }
+    } catch (error) { this._testError = error.message || String(error); }
+    finally { this._testBusy = false; this._renderTest(); }
+  }
+
+  _renderTest() {
+    let host = this.shadowRoot.querySelector("#guided-test");
+    if (!host) {
+      host = document.createElement("div"); host.id = "guided-test";
+      this.shadowRoot.appendChild(host);
+      host.addEventListener("click", e => this._testAction(e));
+      host.addEventListener("change", e => {
+        const device = e.target.dataset.testSelect;
+        const automation = e.target.dataset.testAutomation;
+        const target = device ? this._testSelected : this._testAutomations;
+        const id = device || automation;
+        if (target && id) { if (e.target.checked) target.add(id); else target.delete(id); }
+      });
+    }
+    if (!this._testOpen) { host.replaceChildren(); return; }
+    const esc = value => this._escapeHtml(String(value ?? ""));
+    const btn = (action, label, extra = "") => `<button data-test-action="${action}" ${extra} ${this._testBusy ? "disabled" : ""}>${label}</button>`;
+    let body = "Chargement…", footer = "";
+    if (this._testStage === "select") {
+      body = `<p>Voici les capteurs sans réponse fiable à vérifier physiquement. Prépare la tournée, puis ouvre une fenêtre, déclenche une présence ou réveille chaque capteur : sa ligne sera cochée et barrée dès une réponse. Aucun appareil à réveiller ? Tu peux choisir de tous les tester.</p>
+        ${btn("all", "Tester tous les capteurs")} ${btn("uncovered", "Seulement ceux à réveiller")}
+        ${this._testPreview.devices.filter(d => this._testShowAll || d.needs_wake).map(d => `<label class="test-row"><input type="checkbox" data-test-select="${esc(d.device_id)}" ${this._testSelected.has(d.device_id) ? "checked" : ""}><span><strong>${esc(d.name)}</strong><small>${esc(d.area || "Sans pièce")} · ${d.bridge_offline ? "Passerelle hors ligne : rétablir le réseau avant le test. " : ""}${d.native_radio ? "Suivi radio disponible" : "Test de changement de valeur / validation manuelle"}</small></span></label>`).join("")}`;
+      footer = btn("review", "Préparer la tournée");
+    } else if (this._testStage === "review") {
+      const row = a => `<label class="test-row"><input type="checkbox" data-test-automation="${esc(a.entity_id)}" ${this._testAutomations.has(a.entity_id) ? "checked" : ""} ${a.state !== "on" ? "disabled" : ""}><span>${esc(a.name)}<small>${esc(a.entity_id)} · ${a.state === "on" ? "Activée" : "Déjà désactivée ou indisponible — conservée ainsi"}</small></span></label>`;
+      body = `<p><strong>${this._testSelected.size} capteurs · durée maximale : 30 minutes.</strong></p>
+        <p>Les automatisations cochées seront suspendues, puis réactivées à la fin, après 30 minutes, ou au retour de Home Assistant après un redémarrage. Les actions déjà en cours continuent.</p>
+        <p>Vérifie la liste : templates dynamiques, scripts indirects et automatisations externes peuvent échapper à la détection. Décoche les protections à conserver.</p>
+        <h3>Références détectées</h3>${this._testPreview.automations.filter(a => a.related).map(row).join("") || "Aucune référence directe détectée."}
+        <details><summary>Ajouter d’autres automatisations</summary>${this._testPreview.automations.filter(a => !a.related).map(row).join("")}</details>`;
+      footer = btn("back", "Retour") + btn("start", "Suspendre la sélection et démarrer", this._testSelected.size ? "" : "disabled");
+    } else if (this._testStage === "running") {
+      const session = this._testSession || {};
+      const devices = Object.values(session.devices || {});
+      const remaining = Math.max(0, Math.ceil(((session.expires_at || 0) - Date.now()/1000)/60));
+      const evidence = {radio: "Contact radio reçu", state_change: "Valeur modifiée — preuve limitée", manual: "Validé manuellement"};
+      body = `<p><strong>${devices.filter(d => d.status === "observed").length} / ${devices.length} capteurs observés</strong> · ${session.active ? `${remaining} min restantes` : session.restore?.length ? "Restauration en cours" : "Test terminé — automatisations restaurées"}</p>
+        <p>Déclenche puis remets chaque capteur à son état normal (fuite : à sec). La coche indique la preuve observée. Les changements restent enregistrés dans Home Assistant.</p>
+        ${session.restore?.length ? `<p>${session.restore.length} automatisations à réactiver en fin de test.</p>` : ""}
+        ${session.restoration_errors?.length ? `<p role="alert">Réactivation en attente (nouveaux essais automatiques) : ${session.restoration_errors.map(esc).join(", ")}</p>` : ""}
+        ${devices.map(d => `<div class="test-row ${d.status === "observed" ? "test-done" : ""}" data-render-key="test:${esc(d.device_id)}"><span class="test-tick">${d.status === "observed" ? "✓" : "○"}</span><span><strong>${esc(d.name)}</strong><small>${esc(d.area || "Sans pièce")} · ${esc(evidence[d.evidence] || "À réveiller / déclencher")}</small></span>${session.active && d.status !== "observed" ? btn("confirm", "J’ai vérifié", `data-test-device="${esc(d.device_id)}"`) : ""}</div>`).join("")}`;
+      footer = session.active || session.restore?.length ? btn("end", "Terminer et réactiver maintenant") : btn("new", "Nouveau test");
+    }
+    const template = document.createElement("template");
+    template.innerHTML = `<style>
+      .test-overlay{position:fixed;inset:0;z-index:1000;background:var(--primary-background-color,#111b21);color:var(--primary-text-color,#eee);display:flex;flex-direction:column;padding:20px;box-sizing:border-box}
+      .test-head,.test-foot{display:flex;gap:12px;align-items:center;justify-content:space-between;flex-wrap:wrap}.test-head h2{margin:0}.test-body{overflow:auto;flex:1;padding:12px 0}.test-row{display:flex;align-items:center;gap:12px;padding:14px 4px;border-bottom:1px solid #6665}.test-row span:nth-child(2){flex:1}.test-row small{display:block;opacity:.75;margin-top:5px}.test-tick{font-size:30px;color:#34d399}.test-done{background:#125c3929;border-radius:10px}.test-done strong{color:#62e7a0;text-decoration:line-through}.test-done small{color:#8de8b4}.test-foot{padding-top:10px;padding-bottom:env(safe-area-inset-bottom)}.test-foot button{min-height:48px}.test-row strong{overflow-wrap:anywhere}@media(max-width:600px){.test-overlay{padding:12px}.test-head h2{font-size:20px;flex:1}.test-head button{font-size:12px}.test-overlay p{font-size:14px;line-height:1.4}.test-row{flex-wrap:wrap;padding:16px 6px}.test-row>span:nth-child(2){min-width:55%}.test-row>button{margin-left:42px}.test-foot{flex-direction:column;align-items:stretch}.test-foot button{width:100%;margin:3px 0}}.test-overlay button{background:#167897;color:white;border:0;border-radius:8px;padding:12px;cursor:pointer;margin:4px}.test-overlay button:disabled{opacity:.45}.test-overlay input{min-width:22px;height:22px}.test-error{color:#ffb4ab}.test-overlay summary{cursor:pointer;padding:18px 0}
+      </style><section class="test-overlay" role="dialog" aria-modal="true" aria-label="Tournée de test des capteurs">
+      <div class="test-head"><h2>Tournée de test des capteurs</h2>${btn("close", "Fermer la vue")}</div>
+      <p>Fermer cette vue ne termine pas un test actif. La restauration automatique reste programmée.</p>
+      ${this._testError ? `<p class="test-error" role="alert">${esc(this._testError)}</p>` : ""}
+      <div class="test-body">${body}</div><div class="test-foot">${footer}${this._testBusy ? "Opération en cours…" : ""}</div></section>`;
+    this._patchChildren(host, template.content);
   }
 
   render() {
@@ -501,7 +640,7 @@ class IsItDeadPanel extends HTMLElement {
           .entity-details-wrapper {
             max-height: 0;
             overflow: hidden;
-            transition: max-height 0.4s ease, opacity 0.3s ease;
+            transition: none;
             opacity: 0;
           }
           .entity-details-wrapper.open {
@@ -652,7 +791,8 @@ class IsItDeadPanel extends HTMLElement {
         <div class="panel-container">
           <header>
             <div>
-              <h1>Is It Dead? — Device Monitor</h1>
+              <h1>Is It Dead? <small>1.3.0</small></h1>
+              <button id="open-guided-test" class="filter-chip">Tester les capteurs à réveiller / reprendre</button>
               <p>Device-level health monitoring with check-in anomaly detection</p>
             </div>
           </header>
@@ -714,6 +854,8 @@ class IsItDeadPanel extends HTMLElement {
         </div>
       `;
 
+      this.shadowRoot.querySelector("#open-guided-test").addEventListener("click", () => this._openTest());
+
       // Search input listener
       const searchInput = this.shadowRoot.querySelector("#search-input");
       searchInput.addEventListener("input", (e) => {
@@ -722,7 +864,7 @@ class IsItDeadPanel extends HTMLElement {
       });
 
       // Filter chip listeners
-      const filterChips = this.shadowRoot.querySelectorAll(".filter-chip");
+      const filterChips = this.shadowRoot.querySelectorAll(".filter-chip[data-filter]");
       filterChips.forEach(chip => {
         chip.addEventListener("click", () => {
           filterChips.forEach(c => c.classList.remove("active"));
@@ -776,6 +918,8 @@ class IsItDeadPanel extends HTMLElement {
             if (confirm("Are you sure you want to exclude this device from monitoring?")) {
               this._hass.callService("is_it_dead", "exclude_device", { device_id: trackedDeviceId });
             }
+          } else if (action === "manual-test") {
+            this._openTest(trackedDeviceId);
           } else if (action === "check") {
             this._hass.callService("is_it_dead", "check_device", { device_id: trackedDeviceId });
           } else if (action === "relearn") {
@@ -1075,6 +1219,7 @@ class IsItDeadPanel extends HTMLElement {
           </div>
 
           ${attrs.zigbee_evidence?.backend ? `<div class="detail-row">Source : ${this._escapeHtml(attrs.zigbee_evidence.backend)} · Diagnostic : ${this._escapeHtml(attrs.zigbee_evidence.last_probe?.status || "non demandé")}</div>` : ""}
+          ${!attrs.zigbee_evidence?.backend ? `<div class="detail-row">Pas de diagnostic Zigbee pour cette source. Utiliser le test guidé.</div>` : ""}
           ${snoozeHTML}
         </div>
 
@@ -1093,6 +1238,8 @@ class IsItDeadPanel extends HTMLElement {
         ` : ""}
 
         <div class="card-actions">
+          <button class="action-btn" data-device-entity="${device.entity_id}" data-tracked-device-id="${this._escapeHtml(trackedDeviceId)}" data-action="manual-test">Test guidé</button>
+          ${attrs.zigbee_evidence?.backend ? `<button class="action-btn" data-device-entity="${device.entity_id}" data-tracked-device-id="${this._escapeHtml(trackedDeviceId)}" data-action="check">Vérifier Zigbee</button>` : ""}
           <div class="action-btn-wrapper">
             <button class="action-btn ${isSnoozed ? 'snoozed' : ''}">
               <ha-icon icon="${isSnoozed ? 'mdi:bell-off' : 'mdi:bell-outline'}"></ha-icon>
@@ -1146,4 +1293,4 @@ class IsItDeadPanel extends HTMLElement {
   }
 }
 
-customElements.define('is-it-dead-panel', IsItDeadPanel);
+customElements.define('is-it-dead-panel-v1-3-0', IsItDeadPanel);

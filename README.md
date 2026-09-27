@@ -1,7 +1,7 @@
 # Is It Dead? — device health monitoring
 
 Home Assistant / HACS integration for battery sensors and other physical devices.
-Version 1.2.0 separates **persistent unavailability**, **low battery**, **weak
+Version 1.3.0 separates **persistent unavailability**, **low battery**, **weak
 signal**, and **insufficient evidence**. It cannot prove that a device is physically
 broken or distinguish an empty battery from a failed radio/gateway.
 
@@ -91,3 +91,46 @@ physical functional check; no software can eliminate that uncertainty.
 
 The panel keeps expanded entity lists mounted during state refreshes. Install
 frontend test dependencies with `npm ci`, then run `npm test`.
+
+## Guided physical test (1.3)
+
+Open **Tester les capteurs à réveiller / reprendre** (administrator account required).
+The default checklist contains devices without a reliable response, grouped by
+room. You can also select all monitored devices. Confirm the selection,
+then review the automations to suspend. Direct device/entity references are
+suggested; dynamic templates, scripts and external automations are not guaranteed
+to be detected. You can add other automations or deselect safeguards in the review.
+Nothing is suspended until **Suspendre la sélection et démarrer** is pressed.
+Already-running automation actions continue; only new triggers are suspended.
+
+The mobile full-screen checklist keeps completed rows in place with a green tick
+and a struck-through device name, so you can walk through the rooms with your
+phone. It records new native radio contacts, generic physical
+value changes (limited evidence), and explicit manual confirmations separately.
+Cached unchanged reports do not validate a test. A new radio contact proves
+communication, not the complete sensor function: physically exercise the sensor
+when testing that function. Any monitored device can be selected, including
+SwitchBot and devices without a remotely readable Zigbee attribute.
+
+The UI session lasts at most 30 minutes (service API allows 1–120). **Terminer et
+réactiver maintenant** restores only automations enabled before the test. Closing
+the panel does not end the test: the server still enforces its deadline. A persisted
+recovery journal restores suspensions after a Home Assistant restart, once
+Home Assistant and its automations are available again. Failed restorations stay
+in the journal and retry automatically; their entity IDs are shown on the test
+screen. No restoration can run while Home Assistant itself is shut down.
+
+The panel displays **1.3.0** and uses a versioned custom-element name to avoid
+reusing a previous panel already registered in the browser. Reload the Home
+Assistant app/page after updating. **Vérifier Zigbee** appears only on devices
+with a native ZHA/Zigbee2MQTT adapter; **Test guidé** is available on all cards.
+
+### History during a test
+
+This mode suspends selected Home Assistant automations; it does not intercept
+sensor events. Normal sensor changes remain visible and recorded in Home Assistant.
+Recorder filtering alone would not prevent automation triggers, and disabling an
+entity can prevent observing its state or publish its current alarm when restored.
+No universal sensor-isolation or history-suppression guarantee is provided.
+Return sensors to their normal physical state before ending the tour (for example,
+dry a leak probe after testing it). External automation systems are not suspended.

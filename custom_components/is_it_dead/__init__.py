@@ -13,7 +13,7 @@ import yaml
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import HomeAssistant, SupportsResponse, callback
 from homeassistant.helpers import (
     area_registry as ar,
     config_validation as cv,
@@ -28,6 +28,7 @@ from homeassistant.helpers.event import (
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
+from .test_mode import GuidedTest
 from .zigbee import ZigbeeEvidence
 from .health import assess, deadline, number, timestamp
 
@@ -112,10 +113,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await async_register_panel(
             hass,
             frontend_url_path="is_it_dead",
-            webcomponent_name="is-it-dead-panel",
+            webcomponent_name="is-it-dead-panel-v1-3-0",
             sidebar_title="Is It Dead?",
             sidebar_icon="mdi:battery-alert",
-            module_url="/is_it_dead_ui/is_it_dead_panel.js?v=1.2.0",
+            module_url="/is_it_dead_ui/is_it_dead_panel.js?v=1.3.0",
             require_admin=False,
         )
         _LOGGER.info("Registered 'Is It Dead?' sidebar panel")
@@ -249,6 +250,31 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 m.notify_listeners(None)
                 break
 
+    from homeassistant.helpers.service import async_register_admin_service
+
+    async def test_service(call):
+        m = next(iter(hass.data[DOMAIN].values()))
+        if call.service == "test_preview":
+            return m.guided_test.preview(call.data.get("device_ids"))
+        if call.service == "start_test":
+            return await m.guided_test.start(call.data["device_ids"], call.data["automation_ids"], call.data["minutes"])
+        if call.service == "end_test":
+            return await m.guided_test.stop()
+        if call.service == "confirm_test":
+            return m.guided_test.confirm(call.data["device_id"])
+        return m.guided_test.snapshot()
+
+    test_schemas = {
+        "test_preview": {vol.Optional("device_ids"): [cv.string]},
+        "start_test": {vol.Required("device_ids"): [cv.string], vol.Required("automation_ids"): [cv.entity_id],
+                       vol.Optional("minutes", default=30): vol.All(vol.Coerce(int), vol.Range(min=1, max=120))},
+        "end_test": {}, "test_status": {}, "confirm_test": {vol.Required("device_id"): cv.string},
+    }
+    for name, schema in test_schemas.items():
+        if not hass.services.has_service(DOMAIN, name):
+            async_register_admin_service(hass, DOMAIN, name, test_service, schema=vol.Schema(schema),
+                                         supports_response=SupportsResponse.ONLY)
+
     # Register device-level services
     device_schema = vol.Schema({vol.Required("device_id"): cv.string})
     for svc_name, handler in (
@@ -325,7 +351,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             all_services = (
                 "exclude_entity", "snooze_entity", "relearn_entity",
                 "set_manual_timeout", "exclude_device", "snooze_device",
-                "relearn_device", "check_device",
+                "relearn_device", "check_device", "test_preview", "start_test",
+                "end_test", "test_status", "confirm_test",
             )
             for service in all_services:
                 if hass.services.has_service(DOMAIN, service):
@@ -405,6 +432,7 @@ class IsItDeadManager:
         self._tracked_ids = set()
         self._startup = dt_util.utcnow().timestamp()
         self.zigbee = ZigbeeEvidence(self)
+        self.guided_test = GuidedTest(self)
         self._health_cache = {}
         self._pending = {}
         self._signal_pending = {}
@@ -447,6 +475,8 @@ class IsItDeadManager:
         await self.zigbee.refresh()
         self._refresh_health()
 
+        await self.guided_test.initialize()
+
         # Populate initial battery history
         for device_id, entity_ids in self._device_entity_map.items():
             for entity_id in entity_ids:
@@ -464,6 +494,7 @@ class IsItDeadManager:
 
     async def async_unload(self) -> None:
         """Unsubscribe listeners and save final data."""
+        await self.guided_test.close()
         await self.zigbee.close()
         if self._unsub_state_change:
             self._unsub_state_change()
@@ -897,6 +928,7 @@ class IsItDeadManager:
     @callback
     def _async_handle_state_change(self, event) -> None:
         """Handle real-time state change events — update device-level data."""
+        self.guided_test.observe(event)
         entity_id = event.data["entity_id"]
         new_state = event.data["new_state"]
 

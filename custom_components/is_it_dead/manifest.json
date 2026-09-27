@@ -5,7 +5,7 @@
   "config_flow": true,
   "integration_type": "hub",
   "iot_class": "local_polling",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "dependencies": [
     "frontend",
     "http",
@@ -14,6 +14,7 @@
   "documentation": "https://github.com/ThePastPlayer/IsItDead",
   "issue_tracker": "https://github.com/ThePastPlayer/IsItDead/issues",
   "after_dependencies": [
+    "automation",
     "mqtt",
     "zha"
   ]

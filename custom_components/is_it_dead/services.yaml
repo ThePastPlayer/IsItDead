@@ -77,3 +77,47 @@ check_device:
       required: true
       selector:
         device:
+
+test_preview:
+  name: Preview guided test
+  description: List monitored devices and automation references. Does not change any automation. Admin only.
+  fields:
+    device_ids:
+      selector:
+        device:
+          multiple: true
+start_test:
+  name: Start guided test
+  description: Suspend the explicitly selected automations for at most 120 minutes. Recovery is persisted. Admin only.
+  fields:
+    device_ids:
+      required: true
+      selector:
+        device:
+          multiple: true
+    automation_ids:
+      required: true
+      selector:
+        entity:
+          domain: automation
+          multiple: true
+    minutes:
+      default: 30
+      selector:
+        number:
+          min: 1
+          max: 120
+end_test:
+  name: End guided test
+  description: Restore only automations that were on before this test. Admin only.
+test_status:
+  name: Guided test status
+  description: Read test evidence and outstanding restoration. Admin only.
+confirm_test:
+  name: Confirm manual functional check
+  description: Record an explicit human check, separately from radio evidence. Admin only.
+  fields:
+    device_id:
+      required: true
+      selector:
+        device:

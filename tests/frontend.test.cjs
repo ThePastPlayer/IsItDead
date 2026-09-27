@@ -58,12 +58,12 @@ test('Zigbee probe button and generic test button reflect backend capability',()
 });
 
 test('HA cached panel names all mount and receive properties before attachment', () => {
- for(const name of ['is-it-dead-panel','is-it-dead-panel-v1-3-0','is-it-dead-panel-v1-3-1','is-it-dead-panel-v1-3-2','is-it-dead-panel-v1-3-3']) {
+ for(const name of ['is-it-dead-panel','is-it-dead-panel-v1-3-0','is-it-dead-panel-v1-3-1','is-it-dead-panel-v1-3-2','is-it-dead-panel-v1-3-3','is-it-dead-panel-v1-4-0']) {
   const p=window.document.createElement(name);
   // Match Home Assistant: create by config.name, set props, then append.
   Object.assign(p,{panel:{config:{_panel_custom:{name}}},hass:{states:{'binary_sensor.a':state('a')}},narrow:false,route:{path:''}});
   window.document.body.appendChild(p);
-  assert.match(p.shadowRoot.querySelector('h1').textContent,/1\.3\.3/);
+  assert.match(p.shadowRoot.querySelector('h1').textContent,/1\.4\.0/);
   assert.equal(p.shadowRoot.querySelectorAll('.device-card').length,1);
   p.remove();
  }
@@ -81,4 +81,34 @@ test('automation review shows indirect reasons and all unmatched automations wit
  assert.match(host.textContent,/template dynamique/);
  assert.match(host.textContent,/Other protection/);
  assert.equal(host.querySelector('[data-test-automation="automation.extra"]').closest('details'),null);
+});
+
+
+test('battery editor escapes notes and preserves draft during state updates', () => {
+ const p=make();const device=state('a');p.hass={states:{'binary_sensor.a':device}};
+ const host=window.document.createElement('div');host.id='battery-editor';p.shadowRoot.appendChild(host);
+ p._renderBatteryEditor(host,'a',{battery_type:'AAA',quantity:2,comment:'<img src=x onerror=alert(1)>',history:[{date:'2026-09-01',comment:'<script>bad</script>'}]});
+ assert.equal(host.querySelector('img'),null);assert.equal(host.querySelector('script'),null);
+ const note=host.querySelector('textarea');note.value='Piles lithium, brouillon';
+ for(let i=0;i<5;i++)p.hass={states:{'binary_sensor.a':device}};
+ assert.equal(host.querySelector('textarea'),note);assert.equal(note.value,'Piles lithium, brouillon');
+ assert.ok(host.querySelector('#battery-replaced'));
+});
+
+
+test('saving a battery note does not log a replacement; replacement sends explicit date and id', async () => {
+ const p=make();const calls=[];const profile={battery_type:'AAA',quantity:2,comment:'Lithium',history:[]};
+ p.hass={states:{},callWS:async req=>{calls.push(req);return {response:profile};}};
+ const host=window.document.createElement('div');p.shadowRoot.appendChild(host);
+ p._renderBatteryEditor(host,'device-a',profile);
+ let form=host.querySelector('form');form.reportValidity=()=>true;
+ await form.onsubmit({preventDefault(){}});
+ assert.equal(calls[0].service,'save_battery');assert.equal(calls[0].service_data.comment,'Lithium');
+ assert.equal(calls[0].service_data.replacement_date,undefined);
+ form=host.querySelector('form');form.reportValidity=()=>true;
+ form.querySelector('[name="replacement_date"]').value='2026-09-01';
+ await host.querySelector('#battery-replaced').onclick();
+ assert.equal(calls[1].service_data.replacement_date,'2026-09-01');
+ assert.ok(calls[1].service_data.request_id);
+ assert.match(host.textContent,/Remplacement enregistré/);
 });

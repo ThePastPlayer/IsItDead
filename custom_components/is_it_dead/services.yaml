@@ -121,3 +121,54 @@ confirm_test:
       required: true
       selector:
         device:
+
+battery_info:
+  name: Fiche piles et notes
+  description: Lire le type proposé, les notes et l’historique des remplacements.
+  fields:
+    device_id:
+      required: true
+      selector:
+        device: {}
+save_battery:
+  name: Enregistrer les piles et notes
+  description: Enregistrer la fiche ; renseigner replacement_date et request_id uniquement pour un remplacement explicite.
+  fields:
+    device_id:
+      required: true
+      selector:
+        device: {}
+    battery_type:
+      required: true
+      selector:
+        text: {}
+    quantity:
+      required: true
+      selector:
+        number:
+          min: 1
+          max: 100
+          mode: box
+    comment:
+      required: true
+      selector:
+        text:
+          multiline: true
+    replacement_date:
+      selector:
+        date: {}
+    request_id:
+      selector:
+        text: {}
+
+battery_list:
+  name: Carnet des piles
+  description: Lire les fiches surveillées et importées, y compris celles d’anciens appareils.
+import_battery_notes:
+  name: Importer Battery Notes
+  description: Copier les fiches et dernières dates connues sans supprimer la source. Préserve les fiches locales existantes.
+  fields:
+    dry_run:
+      default: true
+      selector:
+        boolean: {}

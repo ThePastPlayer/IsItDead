@@ -1,7 +1,7 @@
 # Is It Dead? — device health monitoring
 
 Home Assistant / HACS integration for battery sensors and other physical devices.
-Version 1.3.3 separates **persistent unavailability**, **low battery**, **weak
+Version 1.4.0 separates **persistent unavailability**, **low battery**, **weak
 signal**, and **insufficient evidence**. It cannot prove that a device is physically
 broken or distinguish an empty battery from a failed radio/gateway.
 
@@ -159,3 +159,40 @@ actions. Domain-wide templates are labelled as possible links, so conservative
 suggestions may include unrelated automations. Unresolved/dynamic branches and
 external automation systems cannot be exhaustively detected. Every automation
 remains visible for manual selection, with a reason for each suggestion.
+
+## Batteries and notes (1.4.0)
+
+Open **Piles et notes** on a device card to review the proposed type and quantity,
+correct them, and write a comment (for example the chemistry or brand installed).
+Saving the profile validates these fields without logging a replacement.
+**Enregistrer ce remplacement** records the selected date and a snapshot of the
+fields in a persistent local history. Backdated replacements are supported; future
+dates are rejected. A percentage increase alone never records a replacement.
+The device card shows the last replacement age and the current comment.
+
+Suggestions use the Battery Notes community catalogue bundled with this release
+(2,328 entries, snapshot 2026-09-27). Manufacturer/model matches are case insensitive;
+hardware/model variants are respected and ambiguous entries require manual input.
+The catalogue works offline and is refreshed through integration releases.
+Existing Battery Notes sensor metadata may prefill the profile and its replacement
+date; local confirmed fields take precedence. IsItDead does not write back to
+Battery Notes. Profile/history storage is separate from health-learning resets.
+These edit/read services require Home Assistant administrator access.
+
+Catalogue attribution: [Battery Notes by Andrew Jackson and contributors](https://github.com/andrew-codechimp/HA-Battery-Notes),
+MIT license. The exact upstream revision and license are included in
+`custom_components/is_it_dead/data/BATTERY_NOTES_SOURCE.json` and
+`BATTERY_NOTES_LICENSE.txt`. The UI and record management are implemented in IsItDead.
+
+### Migrating from Battery Notes
+
+The admin service `is_it_dead.import_battery_notes` defaults to `dry_run: true`.
+With `dry_run: false`, it durably copies configured notes and stored replacement
+dates into the local book, including records for devices no longer monitored.
+Repeated imports are idempotent; conflicting existing local profiles are retained
+and the imported note is kept separately. Original source fields and timestamps
+are retained in storage. **Carnet des piles** exposes these archive records.
+This service never uninstalls Battery Notes: back up and verify the source, audit
+references to its entities/services and restore any original sensors it hid before
+separately removing the integration. Battery Notes provides its last known
+replacement per device; importing cannot reconstruct dates absent from its store.

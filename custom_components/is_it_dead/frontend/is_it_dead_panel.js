@@ -27,6 +27,81 @@ class IsItDeadPanel extends HTMLElement {
     this._testTimer = null;
   }
 
+  async _openBatteryBook() {
+    let host = this.shadowRoot.querySelector("#battery-editor");
+    if (!host) { host = document.createElement("div"); host.id = "battery-editor"; this.shadowRoot.appendChild(host); }
+    host.innerHTML = `<section role="dialog" aria-modal="true" style="position:fixed;inset:0;z-index:1100;overflow:auto;background:var(--primary-background-color,#111);color:var(--primary-text-color,#eee);padding:20px;box-sizing:border-box"><button id="book-close" style="padding:12px">Fermer</button><h2>Carnet des piles</h2><p>Appareils surveillés et fiches importées, y compris les anciens appareils.</p><div id="book-rows">Chargement…</div></section>`;
+    host.querySelector("#book-close").onclick = () => host.remove();
+    try {
+      const result = await this._testCall("battery_list");
+      const esc = value => this._escapeHtml(String(value ?? ""));
+      host.querySelector("#book-rows").innerHTML = result.devices.map(d => `<button data-battery-open="${esc(d.device_id)}" style="display:block;text-align:left;width:100%;box-sizing:border-box;padding:16px;margin:8px 0;border:1px solid #8885;border-radius:8px;background:var(--card-background-color,#222);color:inherit;cursor:pointer"><strong>${esc(d.name)}</strong><br>${esc(d.quantity)} × ${esc(d.battery_type || "Type à renseigner")} · ${d.monitored ? "Surveillé" : "Fiche conservée / non surveillé"}<br>${d.days_since_replacement == null ? "Aucune date connue" : `Pile changée il y a ${d.days_since_replacement} jour(s)`}<div style="white-space:pre-wrap;overflow-wrap:anywhere">${esc(d.comment)}</div></button>`).join("");
+      host.querySelectorAll("[data-battery-open]").forEach(b => b.onclick = () => this._openBattery(b.dataset.batteryOpen));
+    } catch (error) { host.querySelector("#book-rows").textContent = "Erreur : " + (error.message || error); }
+  }
+
+  async _openBattery(did) {
+    let host = this.shadowRoot.querySelector("#battery-editor");
+    if (!host) { host = document.createElement("div"); host.id = "battery-editor"; this.shadowRoot.appendChild(host); }
+    host.innerHTML = `<section role="dialog" aria-modal="true" style="position:fixed;inset:0;z-index:1100;background:var(--primary-background-color,#111);padding:24px">Chargement… <button id="battery-close">Fermer</button></section>`;
+    host.querySelector("#battery-close").onclick = () => host.remove();
+    try {
+      const profile = await this._testCall("battery_info", {device_id:did});
+      if (host.isConnected || host.parentNode) this._renderBatteryEditor(host, did, profile);
+    } catch (error) {
+      host.querySelector("section").prepend(document.createTextNode("Erreur : " + (error.message || error)));
+    }
+  }
+
+  _renderBatteryEditor(host, did, profile, message = "") {
+    const esc = value => this._escapeHtml(String(value ?? ""));
+    const name = this._devices.find(d => d.attributes.tracked_device_id === did)?.attributes.device_name || profile.name || "Appareil";
+    const today = new Date();
+    const localDate = `${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,"0")}-${String(today.getDate()).padStart(2,"0")}`;
+    const age = profile.days_since_replacement;
+    host.innerHTML = `<style>
+      .battery-modal{position:fixed;inset:0;z-index:1100;overflow:auto;background:var(--primary-background-color,#111);color:var(--primary-text-color,#eee);padding:24px;box-sizing:border-box}.battery-form{max-width:680px;margin:auto}.battery-form label{display:block;margin:18px 0}.battery-form input,.battery-form textarea{display:block;box-sizing:border-box;width:100%;padding:12px;margin-top:8px;border:1px solid #888;border-radius:8px;background:var(--card-background-color,#222);color:inherit;font:inherit}.battery-form button{min-height:44px;padding:12px 18px;border:0;border-radius:8px;background:#167897;color:white;margin:6px;cursor:pointer}.battery-form button:disabled{opacity:.5}.battery-form small{display:block;line-height:1.5;opacity:.8}.battery-entry{padding:12px 0;border-bottom:1px solid #8885;overflow-wrap:anywhere}.battery-comment{white-space:pre-wrap}.battery-feedback{color:var(--primary-text-color,#eee)}@media(max-width:600px){.battery-modal{padding:12px}.battery-form button{width:100%;margin:6px 0}}
+    </style><section class="battery-modal" role="dialog" aria-modal="true" aria-label="Piles et notes"><div class="battery-form">
+      <button id="battery-close">Fermer</button><h2>Piles et notes · ${esc(name)}</h2>
+      <p>${age == null ? "Aucun remplacement enregistré." : `Pile changée ${age === 0 ? "aujourd’hui" : `il y a ${age} jour${age > 1 ? "s" : ""}`} · ${esc(profile.last_replaced)}`}</p>
+      <small>${esc(profile.source || "Aucune correspondance trouvée")} · ${profile.confirmed ? "Type validé" : "Proposition à vérifier"}</small>
+      ${profile.suggestion?.battery_type ? `<small>Catalogue Battery Notes : ${esc(profile.suggestion.quantity)} × ${esc(profile.suggestion.battery_type)}</small>` : profile.suggestion?.ambiguous ? "<small>Plusieurs variantes possibles : renseigne le type manuellement.</small>" : ""}
+      <form id="battery-form">
+        <label>Type de pile / batterie<input name="battery_type" maxlength="80" value="${esc(profile.battery_type)}" placeholder="Ex. AAA, CR2032"></label>
+        <label>Nombre de piles<input name="quantity" type="number" min="1" max="100" step="1" required value="${esc(profile.quantity || 1)}"></label>
+        <label>Commentaire<textarea name="comment" maxlength="2000" rows="4" placeholder="Ex. Piles AAA au lithium installées">${esc(profile.comment)}</textarea></label>
+        <button type="submit">Enregistrer / valider la fiche</button><small>Enregistre le type et le commentaire sans déclarer de remplacement.</small>
+        <label>Date du remplacement<input name="replacement_date" type="date" max="${localDate}" value="${localDate}" required></label>
+        <button type="button" id="battery-replaced">Enregistrer ce remplacement</button><small>Ajoute un événement daté avec le type, la quantité et le commentaire ci-dessus. Une hausse du pourcentage ne crée aucun remplacement automatique.</small>
+      </form><p class="battery-feedback" role="status">${esc(message)}</p>
+      <h3>Historique des remplacements</h3>
+      ${(profile.history || []).map(e => `<div class="battery-entry"><strong>${esc(e.date)}</strong> · ${esc(e.quantity || "")} ${e.battery_type ? "× " + esc(e.battery_type) : ""}<small>${esc(e.source)}</small><div class="battery-comment">${esc(e.comment)}</div></div>`).join("") || "<p>Aucun événement local enregistré.</p>"}
+      <p><small>Catalogue communautaire <a href="https://github.com/andrew-codechimp/HA-Battery-Notes" target="_blank" rel="noopener noreferrer">Battery Notes</a> · licence MIT. Les notes IsItDead sont stockées localement ; elles ne modifient pas l’intégration Battery Notes.</small></p>
+    </div></section>`;
+    host.querySelector("#battery-close").onclick = () => host.remove();
+    const form = host.querySelector("#battery-form");
+    let busy = false;
+    const requestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const save = async replacement => {
+      if (busy || !form.reportValidity()) return;
+      busy = true;
+      host.querySelectorAll("button").forEach(b => b.disabled = true);
+      const value = key => form.querySelector(`[name="${key}"]`).value;
+      const data = {device_id:did, battery_type:value("battery_type"), quantity:Number(value("quantity")), comment:value("comment")};
+      if (replacement) Object.assign(data, {replacement_date:value("replacement_date"), request_id:requestId});
+      try {
+        const updated = await this._testCall("save_battery", data);
+        this._renderBatteryEditor(host, did, updated, replacement ? "Remplacement enregistré." : "Fiche enregistrée.");
+      } catch (error) {
+        host.querySelector(".battery-feedback").textContent = "Enregistrement non confirmé : " + (error.message || error);
+        host.querySelectorAll("button").forEach(b => b.disabled = false);
+        busy = false;
+      }
+    };
+    form.onsubmit = event => { event.preventDefault(); return save(false); };
+    host.querySelector("#battery-replaced").onclick = () => save(true);
+  }
+
   async _testCall(service, data = {}) {
     const result = await this._hass.callWS({type: "call_service", domain: "is_it_dead", service,
       service_data: data, return_response: true});
@@ -791,7 +866,8 @@ class IsItDeadPanel extends HTMLElement {
         <div class="panel-container">
           <header>
             <div>
-              <h1>Is It Dead? <small>1.3.3</small></h1>
+              <h1>Is It Dead? <small>1.4.0</small></h1>
+              <button id="open-battery-book" class="filter-chip">Carnet des piles</button>
               <button id="open-guided-test" class="filter-chip">Tester les capteurs à réveiller / reprendre</button>
               <p>Device-level health monitoring with check-in anomaly detection</p>
             </div>
@@ -854,6 +930,7 @@ class IsItDeadPanel extends HTMLElement {
         </div>
       `;
 
+      this.shadowRoot.querySelector("#open-battery-book").addEventListener("click", () => this._openBatteryBook());
       this.shadowRoot.querySelector("#open-guided-test").addEventListener("click", () => this._openTest());
 
       // Search input listener
@@ -918,6 +995,8 @@ class IsItDeadPanel extends HTMLElement {
             if (confirm("Are you sure you want to exclude this device from monitoring?")) {
               this._hass.callService("is_it_dead", "exclude_device", { device_id: trackedDeviceId });
             }
+          } else if (action === "battery") {
+            this._openBattery(trackedDeviceId);
           } else if (action === "manual-test") {
             this._openTest(trackedDeviceId);
           } else if (action === "check") {
@@ -1237,7 +1316,12 @@ class IsItDeadPanel extends HTMLElement {
         </div>
         ` : ""}
 
+        <div style="padding:0 20px 12px;overflow-wrap:anywhere">
+          ${attrs.battery_record?.days_since_replacement != null ? `<small>Pile changée il y a ${attrs.battery_record.days_since_replacement} jour(s) · ${this._escapeHtml(attrs.battery_record.last_replaced || "")}</small>` : ""}
+          ${attrs.battery_record?.comment ? `<div style="white-space:pre-wrap">${this._escapeHtml(attrs.battery_record.comment)}</div>` : ""}
+        </div>
         <div class="card-actions">
+          <button class="action-btn" data-device-entity="${device.entity_id}" data-tracked-device-id="${this._escapeHtml(trackedDeviceId)}" data-action="battery">Piles et notes</button>
           <button class="action-btn" data-device-entity="${device.entity_id}" data-tracked-device-id="${this._escapeHtml(trackedDeviceId)}" data-action="manual-test">Test guidé</button>
           ${attrs.zigbee_evidence?.backend ? `<button class="action-btn" data-device-entity="${device.entity_id}" data-tracked-device-id="${this._escapeHtml(trackedDeviceId)}" data-action="check">Vérifier Zigbee</button>` : ""}
           <div class="action-btn-wrapper">
@@ -1295,6 +1379,6 @@ class IsItDeadPanel extends HTMLElement {
 
 // Cached HA panel configurations may still request an earlier element name.
 // Use a distinct constructor per alias, and tolerate imports from multiple URLs.
-for (const name of ['is-it-dead-panel', 'is-it-dead-panel-v1-3-0', 'is-it-dead-panel-v1-3-1', 'is-it-dead-panel-v1-3-2', 'is-it-dead-panel-v1-3-3']) {
+for (const name of ['is-it-dead-panel', 'is-it-dead-panel-v1-3-0', 'is-it-dead-panel-v1-3-1', 'is-it-dead-panel-v1-3-2', 'is-it-dead-panel-v1-3-3', 'is-it-dead-panel-v1-4-0']) {
   if (!customElements.get(name)) customElements.define(name, class extends IsItDeadPanel {});
 }

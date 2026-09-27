@@ -224,6 +224,7 @@ class IsItDeadDeviceSensor(BinarySensorEntity):
             "battery_entity_id": battery_entity_id,
             "battery_level": battery_level,
             "battery_type": battery_type,
+            "battery_record": self.manager.batteries.snapshot(self.tracked_device_id),
             "battery_depletion_estimate": depletion,
             "low_battery_warning": low_battery_warning,
             # Status flags

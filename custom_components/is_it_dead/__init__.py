@@ -29,6 +29,7 @@ from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from .frontend_assets import remove_legacy_compressed_panel
+from .batteries import Batteries
 from .test_mode import GuidedTest
 from .zigbee import ZigbeeEvidence
 from .health import assess, deadline, number, timestamp
@@ -101,11 +102,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
             hass.data["is_it_dead_static_registered"] = True
         # A distinct path bypasses module/proxy caches which may ignore query strings.
-        if not hass.data.get("is_it_dead_static_1_3_3", False):
+        if not hass.data.get("is_it_dead_static_1_4_0", False):
             await hass.http.async_register_static_paths(
-                [StaticPathConfig("/is_it_dead_ui_1_3_3", frontend_path, False)]
+                [StaticPathConfig("/is_it_dead_ui_1_4_0", frontend_path, False)]
             )
-            hass.data["is_it_dead_static_1_3_3"] = True
+            hass.data["is_it_dead_static_1_4_0"] = True
         _LOGGER.debug("Registered static path via async_register_static_paths")
     except (ImportError, AttributeError):
         # Fallback for older HA versions
@@ -121,10 +122,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await async_register_panel(
             hass,
             frontend_url_path="is_it_dead",
-            webcomponent_name="is-it-dead-panel-v1-3-3",
+            webcomponent_name="is-it-dead-panel-v1-4-0",
             sidebar_title="Is It Dead?",
             sidebar_icon="mdi:battery-alert",
-            module_url="/is_it_dead_ui_1_3_3/is_it_dead_panel.js",
+            module_url="/is_it_dead_ui_1_4_0/is_it_dead_panel.js",
             require_admin=False,
         )
         _LOGGER.info("Registered 'Is It Dead?' sidebar panel")
@@ -283,6 +284,37 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             async_register_admin_service(hass, DOMAIN, name, test_service, schema=vol.Schema(schema),
                                          supports_response=SupportsResponse.ONLY)
 
+    async def battery_service(call):
+        if call.service in ("import_battery_notes", "battery_list"):
+            m = next(iter(hass.data[DOMAIN].values()))
+            if call.service == "battery_list":
+                return {"devices": m.batteries.list_profiles()}
+            return await m.batteries.import_battery_notes(call.data["dry_run"])
+        did = call.data["device_id"]
+        from homeassistant.exceptions import HomeAssistantError
+        m = next((m for m in hass.data[DOMAIN].values() if did in m.get_monitored_devices() or did in m.batteries.records), None)
+        if m is None:
+            raise HomeAssistantError("Cet appareil n'est plus surveillé.")
+        if call.service == "battery_info":
+            return m.batteries.snapshot(did, True)
+        return await m.batteries.save(did, call.data["battery_type"], call.data["quantity"],
+                                     call.data["comment"], call.data.get("replacement_date"), call.data.get("request_id"))
+
+    for name, schema in {
+        "battery_list": {},
+        "import_battery_notes": {vol.Optional("dry_run", default=True): cv.boolean},
+        "battery_info": {vol.Required("device_id"): cv.string},
+        "save_battery": {vol.Required("device_id"): cv.string,
+                         vol.Required("battery_type"): vol.All(cv.string, vol.Length(max=80)),
+                         vol.Required("quantity"): vol.All(vol.Coerce(int), vol.Range(min=1, max=100)),
+                         vol.Required("comment"): vol.All(cv.string, vol.Length(max=2000)),
+                         vol.Optional("replacement_date"): cv.string,
+                         vol.Optional("request_id"): vol.All(cv.string, vol.Length(min=1, max=100))},
+    }.items():
+        if not hass.services.has_service(DOMAIN, name):
+            async_register_admin_service(hass, DOMAIN, name, battery_service, schema=vol.Schema(schema),
+                                         supports_response=SupportsResponse.ONLY)
+
     # Register device-level services
     device_schema = vol.Schema({vol.Required("device_id"): cv.string})
     for svc_name, handler in (
@@ -360,7 +392,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 "exclude_entity", "snooze_entity", "relearn_entity",
                 "set_manual_timeout", "exclude_device", "snooze_device",
                 "relearn_device", "check_device", "test_preview", "start_test",
-                "end_test", "test_status", "confirm_test",
+                "end_test", "test_status", "confirm_test", "battery_info", "save_battery", "battery_list", "import_battery_notes",
             )
             for service in all_services:
                 if hass.services.has_service(DOMAIN, service):
@@ -441,6 +473,7 @@ class IsItDeadManager:
         self._startup = dt_util.utcnow().timestamp()
         self.zigbee = ZigbeeEvidence(self)
         self.guided_test = GuidedTest(self)
+        self.batteries = Batteries(self)
         self._health_cache = {}
         self._pending = {}
         self._signal_pending = {}
@@ -484,6 +517,7 @@ class IsItDeadManager:
         self._refresh_health()
 
         await self.guided_test.initialize()
+        await self.batteries.initialize()
 
         # Populate initial battery history
         for device_id, entity_ids in self._device_entity_map.items():
@@ -887,7 +921,10 @@ class IsItDeadManager:
         return None, None
 
     def resolve_battery_type(self, device_id: str) -> str:
-        """Resolve battery type from Battery Notes or a battery_type sensor."""
+        """Prefer a confirmed local record, then Battery Notes and its catalogue."""
+        profile = self.batteries.snapshot(device_id)
+        if profile.get("battery_type"):
+            return str(profile["battery_type"])
         if device_id.startswith("__"):
             return "Unknown"
         entity_reg = er.async_get(self.hass)

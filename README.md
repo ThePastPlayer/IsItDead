@@ -1,7 +1,7 @@
 # Is It Dead? — device health monitoring
 
 Home Assistant / HACS integration for battery sensors and other physical devices.
-Version 1.3.1 separates **persistent unavailability**, **low battery**, **weak
+Version 1.3.2 separates **persistent unavailability**, **low battery**, **weak
 signal**, and **insufficient evidence**. It cannot prove that a device is physically
 broken or distinguish an empty battery from a failed radio/gateway.
 
@@ -13,6 +13,13 @@ Add `https://github.com/ThePastPlayer/IsItDead` as a custom HACS integration
 repository, download, restart Home Assistant, then add **Is It Dead?** under
 Settings → Devices & services. The sidebar panel groups devices by room.
 For manual installation, copy `custom_components/is_it_dead` into your configuration.
+
+## Frontend upgrade compatibility
+
+Version 1.3.2 removes obsolete `is_it_dead_panel.js.gz` / `.br` files left by
+older manual installs before registering static routes. Home Assistant otherwise
+serves those files to browsers requesting compression, even when the plain JS
+is newer. The versioned URL also refreshes existing browser/service-worker caches.
 
 ## Detection
 
@@ -120,7 +127,7 @@ Home Assistant and its automations are available again. Failed restorations stay
 in the journal and retry automatically; their entity IDs are shown on the test
 screen. No restoration can run while Home Assistant itself is shut down.
 
-The panel displays **1.3.1** and uses a versioned custom-element name to avoid
+The panel displays **1.3.2** and uses a versioned custom-element name to avoid
 reusing a previous panel already registered in the browser. Reload the Home
 Assistant app/page after updating. **Vérifier Zigbee** appears only on devices
 with a native ZHA/Zigbee2MQTT adapter; **Test guidé** is available on all cards.
@@ -135,7 +142,7 @@ No universal sensor-isolation or history-suppression guarantee is provided.
 Return sensors to their normal physical state before ending the tour (for example,
 dry a leak probe after testing it). External automation systems are not suspended.
 
-### Panel loading compatibility (1.3.1)
+### Panel loading compatibility (1.3.2)
 
 The frontend also registers legacy panel element names, so cached Home Assistant
 panel metadata can still mount it. The current module uses a distinct versioned

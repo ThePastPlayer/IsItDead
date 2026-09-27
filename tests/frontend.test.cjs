@@ -58,12 +58,12 @@ test('Zigbee probe button and generic test button reflect backend capability',()
 });
 
 test('HA cached panel names all mount and receive properties before attachment', () => {
- for(const name of ['is-it-dead-panel','is-it-dead-panel-v1-3-0','is-it-dead-panel-v1-3-1']) {
+ for(const name of ['is-it-dead-panel','is-it-dead-panel-v1-3-0','is-it-dead-panel-v1-3-1','is-it-dead-panel-v1-3-2']) {
   const p=window.document.createElement(name);
   // Match Home Assistant: create by config.name, set props, then append.
   Object.assign(p,{panel:{config:{_panel_custom:{name}}},hass:{states:{'binary_sensor.a':state('a')}},narrow:false,route:{path:''}});
   window.document.body.appendChild(p);
-  assert.match(p.shadowRoot.querySelector('h1').textContent,/1\.3\.1/);
+  assert.match(p.shadowRoot.querySelector('h1').textContent,/1\.3\.2/);
   assert.equal(p.shadowRoot.querySelectorAll('.device-card').length,1);
   p.remove();
  }

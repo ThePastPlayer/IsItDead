@@ -28,6 +28,7 @@ from homeassistant.helpers.event import (
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
+from .frontend_assets import remove_legacy_compressed_panel
 from .test_mode import GuidedTest
 from .zigbee import ZigbeeEvidence
 from .health import assess, deadline, number, timestamp
@@ -90,6 +91,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Register once: static routes survive an integration reload.
     # Register the frontend static directory
     frontend_path = hass.config.path("custom_components/is_it_dead/frontend")
+    await hass.async_add_executor_job(remove_legacy_compressed_panel, frontend_path)
     try:
         # Modern HA (2024.7+): async_register_static_paths
         from homeassistant.components.http import StaticPathConfig
@@ -99,11 +101,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
             hass.data["is_it_dead_static_registered"] = True
         # A distinct path bypasses module/proxy caches which may ignore query strings.
-        if not hass.data.get("is_it_dead_static_1_3_1", False):
+        if not hass.data.get("is_it_dead_static_1_3_2", False):
             await hass.http.async_register_static_paths(
-                [StaticPathConfig("/is_it_dead_ui_1_3_1", frontend_path, False)]
+                [StaticPathConfig("/is_it_dead_ui_1_3_2", frontend_path, False)]
             )
-            hass.data["is_it_dead_static_1_3_1"] = True
+            hass.data["is_it_dead_static_1_3_2"] = True
         _LOGGER.debug("Registered static path via async_register_static_paths")
     except (ImportError, AttributeError):
         # Fallback for older HA versions
@@ -119,10 +121,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await async_register_panel(
             hass,
             frontend_url_path="is_it_dead",
-            webcomponent_name="is-it-dead-panel-v1-3-1",
+            webcomponent_name="is-it-dead-panel-v1-3-2",
             sidebar_title="Is It Dead?",
             sidebar_icon="mdi:battery-alert",
-            module_url="/is_it_dead_ui_1_3_1/is_it_dead_panel.js",
+            module_url="/is_it_dead_ui_1_3_2/is_it_dead_panel.js",
             require_admin=False,
         )
         _LOGGER.info("Registered 'Is It Dead?' sidebar panel")

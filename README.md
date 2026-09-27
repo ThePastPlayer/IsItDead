@@ -1,7 +1,7 @@
 # Is It Dead? — device health monitoring
 
 Home Assistant / HACS integration for battery sensors and other physical devices.
-Version 1.3.0 separates **persistent unavailability**, **low battery**, **weak
+Version 1.3.1 separates **persistent unavailability**, **low battery**, **weak
 signal**, and **insufficient evidence**. It cannot prove that a device is physically
 broken or distinguish an empty battery from a failed radio/gateway.
 
@@ -120,7 +120,7 @@ Home Assistant and its automations are available again. Failed restorations stay
 in the journal and retry automatically; their entity IDs are shown on the test
 screen. No restoration can run while Home Assistant itself is shut down.
 
-The panel displays **1.3.0** and uses a versioned custom-element name to avoid
+The panel displays **1.3.1** and uses a versioned custom-element name to avoid
 reusing a previous panel already registered in the browser. Reload the Home
 Assistant app/page after updating. **Vérifier Zigbee** appears only on devices
 with a native ZHA/Zigbee2MQTT adapter; **Test guidé** is available on all cards.
@@ -134,3 +134,12 @@ entity can prevent observing its state or publish its current alarm when restore
 No universal sensor-isolation or history-suppression guarantee is provided.
 Return sensors to their normal physical state before ending the tour (for example,
 dry a leak probe after testing it). External automation systems are not suspended.
+
+### Panel loading compatibility (1.3.1)
+
+The frontend also registers legacy panel element names, so cached Home Assistant
+panel metadata can still mount it. The current module uses a distinct versioned
+URL path rather than relying only on a query parameter for cache invalidation.
+Multiple module imports do not throw duplicate custom-element registration errors.
+Frontend regressions cover HA's create-element / set-properties / append sequence
+for both legacy names and the current name.

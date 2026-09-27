@@ -791,7 +791,7 @@ class IsItDeadPanel extends HTMLElement {
         <div class="panel-container">
           <header>
             <div>
-              <h1>Is It Dead? <small>1.3.0</small></h1>
+              <h1>Is It Dead? <small>1.3.1</small></h1>
               <button id="open-guided-test" class="filter-chip">Tester les capteurs à réveiller / reprendre</button>
               <p>Device-level health monitoring with check-in anomaly detection</p>
             </div>
@@ -1293,4 +1293,8 @@ class IsItDeadPanel extends HTMLElement {
   }
 }
 
-customElements.define('is-it-dead-panel-v1-3-0', IsItDeadPanel);
+// Cached HA panel configurations may still request an earlier element name.
+// Use a distinct constructor per alias, and tolerate imports from multiple URLs.
+for (const name of ['is-it-dead-panel', 'is-it-dead-panel-v1-3-0', 'is-it-dead-panel-v1-3-1']) {
+  if (!customElements.get(name)) customElements.define(name, class extends IsItDeadPanel {});
+}

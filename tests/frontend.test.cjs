@@ -5,7 +5,7 @@ const vm = require('node:vm');
 const {parseHTML} = require('linkedom');
 const {window} = parseHTML('<html><body></body></html>');
 vm.runInNewContext(fs.readFileSync('custom_components/is_it_dead/frontend/is_it_dead_panel.js','utf8'), {HTMLElement:window.HTMLElement, customElements:window.customElements, document:window.document, console, setTimeout, clearTimeout, setInterval, clearInterval});
-const make = () => new (window.customElements.get('is-it-dead-panel-v1-3-0'))();
+const make = () => new (window.customElements.get('is-it-dead-panel-v1-3-1'))();
 const state = (id, status='alive') => ({entity_id:'binary_sensor.'+id, state:'off', attributes:{device_name:id, tracked_device_id:id, health_status:status, entity_count:1, entities:['sensor.'+id], entity_details:[{entity_id:'sensor.'+id,state:'20'}]}});
 test('expanded entities preserve DOM identity across reports and sorting', () => {
  const p=make(); p.hass={states:{"binary_sensor.a":state('a'),"binary_sensor.b":state('b')}};
@@ -55,4 +55,20 @@ test('Zigbee probe button and generic test button reflect backend capability',()
  assert.ok(p.shadowRoot.querySelector('[data-render-key="binary_sensor.a"] [data-action="check"]'));
  assert.equal(p.shadowRoot.querySelector('[data-render-key="binary_sensor.b"] [data-action="check"]'),null);
  assert.equal(p.shadowRoot.querySelectorAll('[data-action="manual-test"]').length,2);
+});
+
+test('HA cached panel names all mount and receive properties before attachment', () => {
+ for(const name of ['is-it-dead-panel','is-it-dead-panel-v1-3-0','is-it-dead-panel-v1-3-1']) {
+  const p=window.document.createElement(name);
+  // Match Home Assistant: create by config.name, set props, then append.
+  Object.assign(p,{panel:{config:{_panel_custom:{name}}},hass:{states:{'binary_sensor.a':state('a')}},narrow:false,route:{path:''}});
+  window.document.body.appendChild(p);
+  assert.match(p.shadowRoot.querySelector('h1').textContent,/1\.3\.1/);
+  assert.equal(p.shadowRoot.querySelectorAll('.device-card').length,1);
+  p.remove();
+ }
+});
+test('loading the module via another URL does not re-register existing elements', () => {
+ const source=fs.readFileSync('custom_components/is_it_dead/frontend/is_it_dead_panel.js','utf8');
+ assert.doesNotThrow(()=>vm.runInNewContext(source,{HTMLElement:window.HTMLElement,customElements:window.customElements,document:window.document,console,setTimeout,clearTimeout,setInterval,clearInterval}));
 });

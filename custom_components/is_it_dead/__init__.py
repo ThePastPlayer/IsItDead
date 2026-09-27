@@ -98,6 +98,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 [StaticPathConfig("/is_it_dead_ui", frontend_path, False)]
             )
             hass.data["is_it_dead_static_registered"] = True
+        # A distinct path bypasses module/proxy caches which may ignore query strings.
+        if not hass.data.get("is_it_dead_static_1_3_1", False):
+            await hass.http.async_register_static_paths(
+                [StaticPathConfig("/is_it_dead_ui_1_3_1", frontend_path, False)]
+            )
+            hass.data["is_it_dead_static_1_3_1"] = True
         _LOGGER.debug("Registered static path via async_register_static_paths")
     except (ImportError, AttributeError):
         # Fallback for older HA versions
@@ -113,10 +119,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await async_register_panel(
             hass,
             frontend_url_path="is_it_dead",
-            webcomponent_name="is-it-dead-panel-v1-3-0",
+            webcomponent_name="is-it-dead-panel-v1-3-1",
             sidebar_title="Is It Dead?",
             sidebar_icon="mdi:battery-alert",
-            module_url="/is_it_dead_ui/is_it_dead_panel.js?v=1.3.0",
+            module_url="/is_it_dead_ui_1_3_1/is_it_dead_panel.js",
             require_admin=False,
         )
         _LOGGER.info("Registered 'Is It Dead?' sidebar panel")

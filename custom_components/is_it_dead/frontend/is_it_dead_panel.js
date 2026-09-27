@@ -126,12 +126,12 @@ class IsItDeadPanel extends HTMLElement {
         ${this._testPreview.devices.filter(d => this._testShowAll || d.needs_wake).map(d => `<label class="test-row"><input type="checkbox" data-test-select="${esc(d.device_id)}" ${this._testSelected.has(d.device_id) ? "checked" : ""}><span><strong>${esc(d.name)}</strong><small>${esc(d.area || "Sans pièce")} · ${d.bridge_offline ? "Passerelle hors ligne : rétablir le réseau avant le test. " : ""}${d.native_radio ? "Suivi radio disponible" : "Test de changement de valeur / validation manuelle"}</small></span></label>`).join("")}`;
       footer = btn("review", "Préparer la tournée");
     } else if (this._testStage === "review") {
-      const row = a => `<label class="test-row"><input type="checkbox" data-test-automation="${esc(a.entity_id)}" ${this._testAutomations.has(a.entity_id) ? "checked" : ""} ${a.state !== "on" ? "disabled" : ""}><span>${esc(a.name)}<small>${esc(a.entity_id)} · ${a.state === "on" ? "Activée" : "Déjà désactivée ou indisponible — conservée ainsi"}</small></span></label>`;
+      const row = a => `<label class="test-row"><input type="checkbox" data-test-automation="${esc(a.entity_id)}" ${this._testAutomations.has(a.entity_id) ? "checked" : ""} ${a.state !== "on" ? "disabled" : ""}><span>${esc(a.name)}<small>${esc((a.reasons || []).join(" · ") || (a.needs_review ? "Template à vérifier manuellement : lien non établi" : "Aucun lien automatique établi"))}</small><small>${esc(a.entity_id)} · ${a.state === "on" ? "Activée" : "Déjà désactivée ou indisponible — conservée ainsi"}</small></span></label>`;
       body = `<p><strong>${this._testSelected.size} capteurs · durée maximale : 30 minutes.</strong></p>
         <p>Les automatisations cochées seront suspendues, puis réactivées à la fin, après 30 minutes, ou au retour de Home Assistant après un redémarrage. Les actions déjà en cours continuent.</p>
         <p>Vérifie la liste : templates dynamiques, scripts indirects et automatisations externes peuvent échapper à la détection. Décoche les protections à conserver.</p>
-        <h3>Références détectées</h3>${this._testPreview.automations.filter(a => a.related).map(row).join("") || "Aucune référence directe détectée."}
-        <details><summary>Ajouter d’autres automatisations</summary>${this._testPreview.automations.filter(a => !a.related).map(row).join("")}</details>`;
+        <h3>Liens détectés ou possibles — à vérifier</h3>${this._testPreview.automations.filter(a => a.related).map(row).join("") || "Aucun lien détecté : vérifie la liste complète ci-dessous."}
+        <h3>Autres automatisations — ajouter si nécessaire</h3><p>Cette liste reste complète : une absence de lien détecté ne garantit pas qu’une automatisation ne réagira pas au test.</p>${this._testPreview.automations.filter(a => !a.related).map(row).join("")}`;
       footer = btn("back", "Retour") + btn("start", "Suspendre la sélection et démarrer", this._testSelected.size ? "" : "disabled");
     } else if (this._testStage === "running") {
       const session = this._testSession || {};
@@ -791,7 +791,7 @@ class IsItDeadPanel extends HTMLElement {
         <div class="panel-container">
           <header>
             <div>
-              <h1>Is It Dead? <small>1.3.2</small></h1>
+              <h1>Is It Dead? <small>1.3.3</small></h1>
               <button id="open-guided-test" class="filter-chip">Tester les capteurs à réveiller / reprendre</button>
               <p>Device-level health monitoring with check-in anomaly detection</p>
             </div>
@@ -1295,6 +1295,6 @@ class IsItDeadPanel extends HTMLElement {
 
 // Cached HA panel configurations may still request an earlier element name.
 // Use a distinct constructor per alias, and tolerate imports from multiple URLs.
-for (const name of ['is-it-dead-panel', 'is-it-dead-panel-v1-3-0', 'is-it-dead-panel-v1-3-1', 'is-it-dead-panel-v1-3-2']) {
+for (const name of ['is-it-dead-panel', 'is-it-dead-panel-v1-3-0', 'is-it-dead-panel-v1-3-1', 'is-it-dead-panel-v1-3-2', 'is-it-dead-panel-v1-3-3']) {
   if (!customElements.get(name)) customElements.define(name, class extends IsItDeadPanel {});
 }

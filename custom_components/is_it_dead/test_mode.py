@@ -41,12 +41,12 @@ class GuidedTest:
         await self.stop()
 
     def preview(self, device_ids=None):
-        from homeassistant.components.automation import automations_with_device, automations_with_entity
+        from .automation_links import find_automation_links
         devices = self.manager.get_monitored_devices()
         selected = set(devices if device_ids is None else device_ids)
         if not selected <= devices.keys():
             raise HomeAssistantError("Un appareil sélectionné n'est plus surveillé.")
-        related = set()
+        selected_entities = set()
         rows = []
         registry = er.async_get(self.hass)
         for did, device in devices.items():
@@ -62,12 +62,13 @@ class GuidedTest:
                          "needs_wake": needs_wake, "reason": health.get("reason"),
                          "bridge_offline": native.get("bridge_available") is False})
             if did in selected:
-                related.update(automations_with_device(self.hass, did))
-                for entity in er.async_entries_for_device(registry, did):
-                    related.update(automations_with_entity(self.hass, entity.entity_id))
+                selected_entities.update(entity.entity_id for entity in er.async_entries_for_device(registry, did))
+        reasons, uncertain = find_automation_links(self.hass, selected_entities, selected)
         automations = [{"entity_id": s.entity_id, "name": s.name, "state": s.state,
-                        "related": s.entity_id in related}
+                        "related": s.entity_id in reasons, "reasons": reasons.get(s.entity_id, []),
+                        "needs_review": s.entity_id in uncertain}
                        for s in self.hass.states.async_all("automation")]
+        automations.sort(key=lambda a: (not a["related"], not a["needs_review"], a["name"].casefold()))
         rows.sort(key=lambda d: ((d.get("area") or "~").casefold(), d["name"].casefold()))
         return {"devices": rows, "automations": automations, "session": self.snapshot()}
 

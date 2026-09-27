@@ -1,7 +1,7 @@
 # Is It Dead? — device health monitoring
 
 Home Assistant / HACS integration for battery sensors and other physical devices.
-Version 1.3.2 separates **persistent unavailability**, **low battery**, **weak
+Version 1.3.3 separates **persistent unavailability**, **low battery**, **weak
 signal**, and **insufficient evidence**. It cannot prove that a device is physically
 broken or distinguish an empty battery from a failed radio/gateway.
 
@@ -150,3 +150,12 @@ URL path rather than relying only on a query parameter for cache invalidation.
 Multiple module imports do not throw duplicate custom-element registration errors.
 Frontend regressions cover HA's create-element / set-properties / append sequence
 for both legacy names and the current name.
+
+### Guided automation review (1.3.3)
+
+The review includes Home Assistant references, nested groups, literal template
+references, and dependencies observed while rendering templates without executing
+actions. Domain-wide templates are labelled as possible links, so conservative
+suggestions may include unrelated automations. Unresolved/dynamic branches and
+external automation systems cannot be exhaustively detected. Every automation
+remains visible for manual selection, with a reason for each suggestion.

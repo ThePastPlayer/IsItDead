@@ -58,12 +58,12 @@ test('Zigbee probe button and generic test button reflect backend capability',()
 });
 
 test('HA cached panel names all mount and receive properties before attachment', () => {
- for(const name of ['is-it-dead-panel','is-it-dead-panel-v1-3-0','is-it-dead-panel-v1-3-1','is-it-dead-panel-v1-3-2']) {
+ for(const name of ['is-it-dead-panel','is-it-dead-panel-v1-3-0','is-it-dead-panel-v1-3-1','is-it-dead-panel-v1-3-2','is-it-dead-panel-v1-3-3']) {
   const p=window.document.createElement(name);
   // Match Home Assistant: create by config.name, set props, then append.
   Object.assign(p,{panel:{config:{_panel_custom:{name}}},hass:{states:{'binary_sensor.a':state('a')}},narrow:false,route:{path:''}});
   window.document.body.appendChild(p);
-  assert.match(p.shadowRoot.querySelector('h1').textContent,/1\.3\.2/);
+  assert.match(p.shadowRoot.querySelector('h1').textContent,/1\.3\.3/);
   assert.equal(p.shadowRoot.querySelectorAll('.device-card').length,1);
   p.remove();
  }
@@ -71,4 +71,14 @@ test('HA cached panel names all mount and receive properties before attachment',
 test('loading the module via another URL does not re-register existing elements', () => {
  const source=fs.readFileSync('custom_components/is_it_dead/frontend/is_it_dead_panel.js','utf8');
  assert.doesNotThrow(()=>vm.runInNewContext(source,{HTMLElement:window.HTMLElement,customElements:window.customElements,document:window.document,console,setTimeout,clearTimeout,setInterval,clearInterval}));
+});
+
+
+test('automation review shows indirect reasons and all unmatched automations without disclosure', () => {
+ const p=make();p.hass={states:{}};p._testOpen=true;p._testStage='review';p._testSelected=new Set(['a']);p._testAutomations=new Set(['automation.leak']);
+ p._testPreview={automations:[{entity_id:'automation.leak',name:'Leak alert',state:'on',related:true,reasons:['Lien possible : template dynamique']},{entity_id:'automation.extra',name:'Other protection',state:'on',related:false,needs_review:true}]};
+ p._renderTest();const host=p.shadowRoot.querySelector('#guided-test');
+ assert.match(host.textContent,/template dynamique/);
+ assert.match(host.textContent,/Other protection/);
+ assert.equal(host.querySelector('[data-test-automation="automation.extra"]').closest('details'),null);
 });

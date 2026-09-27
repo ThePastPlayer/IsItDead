@@ -152,3 +152,32 @@ async def test_walk_defaults_to_devices_without_reliable_response(manager):
     assert not preview["devices"][0]["needs_wake"]
     manager.zigbee.sources[device.id]["available"] = False
     assert manager.guided_test.preview()["devices"][0]["needs_wake"]
+
+
+@pytest.mark.asyncio
+async def test_review_finds_dynamic_leak_templates_and_nested_groups(manager):
+    from types import SimpleNamespace
+    from homeassistant.components import automation
+    from is_it_dead.automation_links import find_automation_links
+    h = manager.hass
+    h.states.async_set("binary_sensor.capteur_fuite_wc", "off")
+    h.states.async_set("binary_sensor.leaks", "off", {"entity_id": ["binary_sensor.capteur_fuite_wc"]})
+    h.states.async_set("group.all_leaks", "off", {"entity_id": ["binary_sensor.leaks"]})
+    def item(eid, template=None, refs=()):
+        return SimpleNamespace(entity_id=eid, referenced_entities=set(refs), referenced_devices=set(),
+            raw_config={"triggers": [{"value_template": template}]} if template else {})
+    h.data[automation.DATA_COMPONENT] = SimpleNamespace(entities=[
+        item("automation.leak_alert", "{{ states.binary_sensor | selectattr('entity_id', 'search', 'binary_sensor.capteur_fuite_') | selectattr('state', 'eq', 'on') | list | count > 0 }}"),
+        item("automation.group_alert", refs=["group.all_leaks"]),
+        item("automation.unrelated", "{{ states.person | list | count > 0 }}"),
+        item("automation.variable", "{{ states(sensor_variable) }}"),
+        item("automation.branch", "{{ states('binary_sensor.capteur_fuite_wc') if false else 'off' }}"),
+    ])
+    links, uncertain = find_automation_links(h, {"binary_sensor.capteur_fuite_wc"}, set())
+    assert "automation.leak_alert" in links
+    assert any("possible" in reason for reason in links["automation.leak_alert"])
+    assert "automation.group_alert" in links
+    assert "automation.branch" in links  # inactive branch still has a literal reference
+    assert "automation.unrelated" not in links
+    assert "automation.variable" in uncertain
+    assert h.states.get("binary_sensor.capteur_fuite_wc").state == "off"
